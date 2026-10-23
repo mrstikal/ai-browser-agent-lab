@@ -2,6 +2,7 @@ import { z } from "zod";
 import { imageModelSettingsSchema } from "@/lib/schemas";
 import { getKeyStatus, loadOpenRouterKey } from "@/server/credentials";
 import { startImageJob } from "@/server/image-job";
+import { startImageBatch } from "@/server/image-batch";
 import { ImageStateCorruptionError } from "@/server/image-state";
 import { readGuardedMutation } from "@/server/mutation-guard";
 import { createStorage } from "@/server/storage";
@@ -92,11 +93,19 @@ export async function POST(request: Request) {
   }
 
   switch (result.status) {
-    case "started":
+    case "started": {
+      // Fire-and-forget: the worker holds the admitted lock and persists all
+      // progress. Duplicate starts join this controller instead of forking it.
+      void startImageBatch({
+        storage: createStorage(),
+        jobId: result.job.jobId,
+        apiKey,
+      });
       return Response.json(
         { ok: true, existing: false, job: result.job },
         { status: 200, headers: { "cache-control": "no-store" } },
       );
+    }
     case "existing":
       return Response.json(
         { ok: true, existing: true, job: result.job },

@@ -90,6 +90,7 @@ function holder(): ImageJobHolder {
 }
 
 const JOB_QUEUES = new Map<string, Promise<void>>();
+const JOB_WRITE_QUEUES = new Map<string, Promise<void>>();
 
 function withImageJobLock<T>(
   storage: Storage,
@@ -107,6 +108,50 @@ function withImageJobLock<T>(
     if (JOB_QUEUES.get(key) === settled) JOB_QUEUES.delete(key);
   });
   return run;
+}
+
+function withImageJobWriteLock<T>(
+  storage: Storage,
+  task: () => Promise<T>,
+): Promise<T> {
+  const key = storage.root;
+  const previous = JOB_WRITE_QUEUES.get(key) ?? Promise.resolve();
+  const run = previous.then(task, task);
+  const settled = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  JOB_WRITE_QUEUES.set(key, settled);
+  void settled.finally(() => {
+    if (JOB_WRITE_QUEUES.get(key) === settled) JOB_WRITE_QUEUES.delete(key);
+  });
+  return run;
+}
+
+/**
+ * Serialized read-merge-write of the current job snapshot. The mutator sees
+ * the latest persisted stop request/status, so worker progress writes can
+ * never clobber a stop that landed while a request was in flight.
+ */
+export async function updateImageJob(
+  storage: Storage,
+  jobId: string,
+  update: (current: ImageJobSnapshot) => ImageJobSnapshot | null,
+  now: Date = new Date(),
+): Promise<ImageJobSnapshot | null> {
+  return withImageJobWriteLock(storage, async () => {
+    const current = await loadImageJob(storage);
+    if (!current || current.jobId !== jobId) return null;
+    const next = update(current);
+    if (next === null) return current;
+    const saved: ImageJobSnapshot = {
+      ...next,
+      jobId: current.jobId,
+      updatedAt: now.toISOString(),
+    };
+    await saveImageJob(storage, saved);
+    return saved;
+  });
 }
 
 function jobQuote(quote: ImageQuote): ImageJobQuote {
@@ -279,30 +324,32 @@ export async function requestImageJobStop(options: {
   readonly jobId: string;
   readonly now?: Date | undefined;
 }): Promise<StopImageJobResult> {
-  // Deliberately not serialized behind admission: a stop must persist promptly
-  // even while a start quote recheck is waiting on provider metadata. The job
-  // file write is atomic and job-ID checked.
-  const job = await loadImageJob(options.storage);
-  if (!job) return { applied: false, reason: "no-job", job: null };
-  if (job.jobId !== options.jobId) {
-    return { applied: false, reason: "wrong-job", job: null };
-  }
-  if (!isActiveImageJobStatus(job.status)) {
-    return { applied: false, reason: "finished", job };
-  }
-  if (job.stopRequest !== null) {
-    return { applied: false, reason: "duplicate", job };
-  }
+  // Uses only the short job-write lock, never the admission queue, so a stop
+  // persists promptly even while a start quote recheck waits on provider
+  // metadata. The write is serialized against every worker progress write.
+  return withImageJobWriteLock(options.storage, async () => {
+    const job = await loadImageJob(options.storage);
+    if (!job) return { applied: false, reason: "no-job", job: null };
+    if (job.jobId !== options.jobId) {
+      return { applied: false, reason: "wrong-job", job: null };
+    }
+    if (!isActiveImageJobStatus(job.status)) {
+      return { applied: false, reason: "finished", job };
+    }
+    if (job.stopRequest !== null) {
+      return { applied: false, reason: "duplicate", job };
+    }
 
-  const now = options.now ?? new Date();
-  const updated: ImageJobSnapshot = {
-    ...job,
-    status: "stopping",
-    stopRequest: { jobId: job.jobId, requestedAt: now.toISOString() },
-    updatedAt: now.toISOString(),
-  };
-  await saveImageJob(options.storage, updated);
-  return { applied: true, job: updated };
+    const now = options.now ?? new Date();
+    const updated: ImageJobSnapshot = {
+      ...job,
+      status: "stopping",
+      stopRequest: { jobId: job.jobId, requestedAt: now.toISOString() },
+      updatedAt: now.toISOString(),
+    };
+    await saveImageJob(options.storage, updated);
+    return { applied: true, job: updated };
+  });
 }
 
 /**

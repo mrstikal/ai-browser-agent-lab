@@ -60,6 +60,7 @@ export interface ImageGenerationFailure {
   readonly code: ImageGenerationFailureCode;
   readonly message: string;
   readonly httpStatus: number | null;
+  readonly retryAfterSeconds: number | null;
 }
 
 export type ImageGenerationResult =
@@ -271,6 +272,7 @@ async function generateOneImageLocked(input: {
 
   if (!fetched.ok) {
     if (fetched.kind === "http") {
+      const retryAfterSeconds = fetched.retryAfterSeconds;
       if (fetched.status === 401) {
         return failAttempt({
           storage,
@@ -280,6 +282,7 @@ async function generateOneImageLocked(input: {
           now,
           code: "unauthorized",
           httpStatus: 401,
+          retryAfterSeconds,
           message:
             "OpenRouter rejected the key. This rejection is not expected to be billed and nothing was published.",
         });
@@ -293,6 +296,7 @@ async function generateOneImageLocked(input: {
           now,
           code: "insufficient-credit",
           httpStatus: 402,
+          retryAfterSeconds,
           message:
             "OpenRouter returned 402: the account balance is below the $1 per-request floor. This rejection is not billed and nothing was published.",
         });
@@ -306,6 +310,7 @@ async function generateOneImageLocked(input: {
           now,
           code: "rate-limited",
           httpStatus: 429,
+          retryAfterSeconds,
           message:
           "OpenRouter rate-limited the request. This rejection is not expected to be billed and nothing was published.",
         });
@@ -318,6 +323,7 @@ async function generateOneImageLocked(input: {
         now,
         code: "provider-error",
         httpStatus: fetched.status,
+        retryAfterSeconds,
         message: "The image provider returned an error. Nothing was published.",
       });
     }
@@ -331,7 +337,7 @@ async function generateOneImageLocked(input: {
         code: "timeout",
         httpStatus: null,
         message:
-          "The request timed out. The provider may still charge for this attempt; cost stays unknown and it is not retried automatically.",
+          "The request timed out. The provider may still charge for this attempt; cost stays unknown and a bounded retry may follow.",
       });
     }
     if (fetched.kind === "network") {
@@ -510,6 +516,7 @@ async function failAttempt(options: {
   readonly code: ImageGenerationFailureCode;
   readonly httpStatus: number | null;
   readonly message: string;
+  readonly retryAfterSeconds?: number | null | undefined;
 }): Promise<ImageGenerationFailure> {
   const failed = markAttemptFailed(
     options.manifest,
@@ -527,6 +534,7 @@ async function failAttempt(options: {
     attemptId: options.attemptId,
     code: options.code,
     httpStatus: options.httpStatus,
+    retryAfterSeconds: options.retryAfterSeconds ?? null,
     message: options.message,
   };
 }

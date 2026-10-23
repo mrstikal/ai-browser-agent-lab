@@ -1,19 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createServer, type Server, type ServerResponse } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as startRoute from "@/app/api/images/job/start/route";
 import * as stopRoute from "@/app/api/images/job/stop/route";
+import { awaitImageBatch } from "@/server/image-batch";
 import {
+  createImageJobSnapshot,
   loadImageJob,
   saveImageJob,
 } from "@/server/image-state";
 import {
   admittedImageJobId,
   PAID_JOB_LOCK_SEGMENTS,
-  releaseAdmittedImageJob,
   resetAdmittedImageJobsForTests,
 } from "@/server/image-job";
 import { prepareImageQuote } from "@/server/image-quote";
@@ -30,13 +31,16 @@ import {
   setOpenRouterKey,
 } from "@/server/credentials";
 import { Storage } from "@/server/storage";
-import { attemptId } from "./helpers/image-fixtures";
+import { attemptId, pngBytes } from "./helpers/image-fixtures";
 
 const tempDirs: string[] = [];
 const servers: Server[] = [];
 const requests: Array<{ method: string; path: string }> = [];
-let catalogStatus = 200;
 const originalEnv = { ...process.env };
+let catalogStatus = 200;
+let imageHandler:
+  | ((request: IncomingMessage, response: ServerResponse) => void | Promise<void>)
+  | null = null;
 
 async function makeDataDir(): Promise<string> {
   const base = await mkdtemp(join(tmpdir(), "ai-browser-lab-job-routes-"));
@@ -50,7 +54,7 @@ function json(response: ServerResponse, status: number, body: unknown): void {
 }
 
 async function startCatalog(): Promise<string> {
-  const server = createServer((request, response) => {
+  const server = createServer(async (request, response) => {
     const path = request.url ?? "";
     requests.push({ method: request.method ?? "", path });
     if (path === "/api/v1/images/models") {
@@ -86,6 +90,22 @@ async function startCatalog(): Promise<string> {
             ],
           },
         ],
+      });
+      return;
+    }
+    if (path === "/api/v1/images") {
+      if (imageHandler) {
+        await imageHandler(request, response);
+        return;
+      }
+      json(response, 200, {
+        data: [
+          {
+            b64_json: pngBytes(32, 32).toString("base64"),
+            media_type: "image/png",
+          },
+        ],
+        usage: { cost: 0.008 },
       });
       return;
     }
@@ -125,18 +145,25 @@ async function fingerprint(storage: Storage): Promise<string> {
   return quote.fingerprint;
 }
 
+function imagePostCount(): number {
+  return requests.filter(
+    (request) => request.method === "POST" && request.path === "/api/v1/images",
+  ).length;
+}
+
 beforeEach(async () => {
   await resetAdmittedImageJobsForTests();
   resetPaidOperationsForTests();
   resetCredentialHolderForTests();
   requests.length = 0;
+  catalogStatus = 200;
+  imageHandler = null;
   const dataDir = await makeDataDir();
   const baseUrl = await startCatalog();
   process.env.DATA_DIR = dataDir;
   process.env.LAB_TEST_MODE = "1";
   process.env.OPENROUTER_BASE_URL = baseUrl;
   process.env.APP_ORIGIN = "http://127.0.0.1:3000";
-  catalogStatus = 200;
   await setOpenRouterKey("sk-or-v1-job-route-key", {
     remember: false,
     env: { DATA_DIR: dataDir },
@@ -160,7 +187,7 @@ afterEach(async () => {
 });
 
 describe("image job start route", () => {
-  it("starts one job, shares duplicates, and never echoes the key", async () => {
+  it("starts one job, shares duplicates, and runs the batch to completion", async () => {
     const storage = new Storage(process.env.DATA_DIR ?? "");
     const accepted = await fingerprint(storage);
 
@@ -178,7 +205,6 @@ describe("image job start route", () => {
     };
     expect(startedBody.ok).toBe(true);
     expect(startedBody.existing).toBe(false);
-    expect(startedBody.job.status).toBe("queued");
     expect(startedBody.job.quote.fingerprint).toBe(accepted);
     expect(JSON.stringify(startedBody)).not.toContain("sk-or-v1-job-route-key");
     expect(admittedImageJobId(storage)).toBe(startedBody.job.jobId);
@@ -189,7 +215,6 @@ describe("image job start route", () => {
       ownerId: startedBody.job.jobId,
     });
 
-    const requestsAfterStart = requests.length;
     const duplicate = await startRoute.POST(
       makeRequest("POST", "/api/images/job/start", {
         confirm: true,
@@ -203,9 +228,22 @@ describe("image job start route", () => {
     };
     expect(duplicateBody.existing).toBe(true);
     expect(duplicateBody.job.jobId).toBe(startedBody.job.jobId);
-    expect(requests.length).toBe(requestsAfterStart);
-    expect(requests.every((request) => request.method === "GET")).toBe(true);
-  });
+
+    await awaitImageBatch(storage);
+    const job = await loadImageJob(storage);
+    expect(job?.status).toBe("completed");
+    expect(job?.targets.every((target) => target.status === "succeeded")).toBe(true);
+    expect(imagePostCount()).toBe(24);
+    expect(
+      (await readdir(storage.path(["images"]))).filter((name) =>
+        name.endsWith(".png"),
+      ),
+    ).toHaveLength(24);
+    expect(admittedImageJobId(storage)).toBeNull();
+    expect(
+      await readLockMetadata(storage.path(PAID_JOB_LOCK_SEGMENTS)),
+    ).toBeUndefined();
+  }, 30_000);
 
   it("releases the lock on a stale fingerprint and persists no job", async () => {
     const storage = new Storage(process.env.DATA_DIR ?? "");
@@ -226,6 +264,7 @@ describe("image job start route", () => {
     expect(
       await readLockMetadata(storage.path(PAID_JOB_LOCK_SEGMENTS)),
     ).toBeUndefined();
+    expect(imagePostCount()).toBe(0);
   });
 
   it("requires a key and refuses while another paid operation is active", async () => {
@@ -259,14 +298,12 @@ describe("image job start route", () => {
 
   it("maps active-job, rejected-quote, unavailable, and corrupt-state outcomes", async () => {
     const storage = new Storage(process.env.DATA_DIR ?? "");
-    const accepted = await fingerprint(storage);
-    const started = await startRoute.POST(
-      makeRequest("POST", "/api/images/job/start", {
-        confirm: true,
-        fingerprint: accepted,
-      }),
-    );
-    expect(started.status).toBe(200);
+    const persisted = createImageJobSnapshot({
+      jobId: attemptId(850),
+      productIds: ["P01"],
+      now: new Date(),
+    });
+    await saveImageJob(storage, { ...persisted, status: "running" });
 
     const competing = await startRoute.POST(
       makeRequest("POST", "/api/images/job/start", {
@@ -279,13 +316,8 @@ describe("image job start route", () => {
       error: { code: "job-active" },
     });
 
-    await releaseAdmittedImageJob({
-      storage,
-      jobId: admittedImageJobId(storage) ?? "",
-    });
-    const releasedJob = await loadImageJob(storage);
     await saveImageJob(storage, {
-      ...(releasedJob as NonNullable<typeof releasedJob>),
+      ...persisted,
       status: "failed",
       updatedAt: new Date().toISOString(),
     });
@@ -359,6 +391,30 @@ describe("image job stop route", () => {
   it("applies only the matching active job and is idempotent", async () => {
     const storage = new Storage(process.env.DATA_DIR ?? "");
     const accepted = await fingerprint(storage);
+
+    let notifyStarted: (() => void) | null = null;
+    const firstImageStarted = new Promise<void>((resolve) => {
+      notifyStarted = resolve;
+    });
+    const gate: { release: (() => void) | null } = { release: null };
+    imageHandler = (_request, response) =>
+      new Promise<void>((resolve) => {
+        notifyStarted?.();
+        notifyStarted = null;
+        gate.release = () => {
+          json(response, 200, {
+            data: [
+              {
+                b64_json: pngBytes(32, 32).toString("base64"),
+                media_type: "image/png",
+              },
+            ],
+            usage: { cost: 0.008 },
+          });
+          resolve();
+        };
+      });
+
     const started = await startRoute.POST(
       makeRequest("POST", "/api/images/job/start", {
         confirm: true,
@@ -366,6 +422,7 @@ describe("image job stop route", () => {
       }),
     );
     const jobId = ((await started.json()) as { job: { jobId: string } }).job.jobId;
+    await firstImageStarted;
 
     const wrong = await stopRoute.POST(
       makeRequest("POST", "/api/images/job/stop", { jobId: attemptId(800) }),
@@ -375,7 +432,6 @@ describe("image job stop route", () => {
       applied: false,
       reason: "wrong-job",
     });
-    expect((await loadImageJob(storage))?.stopRequest).toBeNull();
 
     const applied = await stopRoute.POST(
       makeRequest("POST", "/api/images/job/stop", { jobId }),
@@ -395,10 +451,24 @@ describe("image job stop route", () => {
       status: "stopping",
     });
 
-    expect(await releaseAdmittedImageJob({ storage, jobId })).toBe(true);
-    const stored = await loadImageJob(storage);
+    const release = gate.release as (() => void) | null;
+    if (!release) throw new Error("Image gate was not armed.");
+    release();
+    await awaitImageBatch(storage);
+
+    const stopped = await loadImageJob(storage);
+    expect(stopped?.status).toBe("stopped_by_user");
+    expect(stopped?.stopRequest?.jobId).toBe(jobId);
+    expect(imagePostCount()).toBe(1);
+    expect(
+      stopped?.targets.filter((target) => target.status === "succeeded"),
+    ).toHaveLength(1);
+    expect(
+      await readLockMetadata(storage.path(PAID_JOB_LOCK_SEGMENTS)),
+    ).toBeUndefined();
+
     await saveImageJob(storage, {
-      ...(stored as NonNullable<typeof stored>),
+      ...(stopped as NonNullable<typeof stopped>),
       status: "stopped_by_user",
       updatedAt: new Date().toISOString(),
     });
@@ -410,7 +480,7 @@ describe("image job stop route", () => {
       reason: "finished",
       status: "stopped_by_user",
     });
-  });
+  }, 30_000);
 
   it("enforces the mutation guard", async () => {
     const response = await stopRoute.POST(

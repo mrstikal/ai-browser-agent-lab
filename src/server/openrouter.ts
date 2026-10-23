@@ -206,6 +206,20 @@ async function readBoundedResponseText(
   return { ok: true, text: Buffer.concat(chunks).toString("utf8") };
 }
 
+const MAX_RETRY_AFTER_SECONDS = 3600;
+
+function parseRetryAfter(value: string | null): number | null {
+  if (value === null) return null;
+  const trimmed = value.trim();
+  if (/^\d+$/.test(trimmed)) {
+    return Math.min(Number(trimmed), MAX_RETRY_AFTER_SECONDS);
+  }
+  const date = Date.parse(trimmed);
+  if (Number.isNaN(date)) return null;
+  const seconds = Math.ceil((date - Date.now()) / 1000);
+  return Math.max(0, Math.min(seconds, MAX_RETRY_AFTER_SECONDS));
+}
+
 export interface FetchOpenRouterJsonOptions {
   readonly headers?: Record<string, string> | undefined;
   readonly fetchImpl?: typeof fetch | undefined;
@@ -215,7 +229,12 @@ export interface FetchOpenRouterJsonOptions {
 
 export type FetchOpenRouterJsonResult =
   | { readonly ok: true; readonly status: number; readonly json: unknown }
-  | { readonly ok: false; readonly kind: "http"; readonly status: number }
+  | {
+      readonly ok: false;
+      readonly kind: "http";
+      readonly status: number;
+      readonly retryAfterSeconds: number | null;
+    }
   | {
       readonly ok: false;
       readonly kind: "network" | "timeout" | "invalid-response";
@@ -263,7 +282,12 @@ async function executeOpenRouterJsonRequest(
     }
 
     if (!response.ok) {
-      return { ok: false, kind: "http", status: response.status };
+      return {
+        ok: false,
+        kind: "http",
+        status: response.status,
+        retryAfterSeconds: parseRetryAfter(response.headers.get("retry-after")),
+      };
     }
 
     const body = await readBoundedResponseText(response, maxBytes);
