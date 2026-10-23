@@ -107,6 +107,65 @@ describe("storage foundation", () => {
     );
   });
 
+  it("deletes files idempotently and reports missing paths", async () => {
+    const storage = await makeStorage();
+    expect(await storage.deleteFile(["secrets", "openrouter-key"])).toBe(false);
+
+    await storage.writeFile(["secrets", "openrouter-key"], "sk-or-v1-test");
+    const target = storage.path(["secrets", "openrouter-key"]);
+    expect((await stat(target)).isFile()).toBe(true);
+
+    expect(await storage.deleteFile(["secrets", "openrouter-key"])).toBe(true);
+    expect(await storage.readFile(["secrets", "openrouter-key"])).toBeUndefined();
+    expect(await storage.deleteFile(["secrets", "openrouter-key"])).toBe(false);
+  });
+
+  it("lists regular files safely and ignores missing directories", async () => {
+    const storage = await makeStorage();
+    expect(await storage.listFiles(["secrets"])).toEqual([]);
+
+    await storage.writeFile(["secrets", "b.txt"], "b");
+    await storage.writeFile(["secrets", "a.txt"], "a");
+    await mkdir(storage.path(["secrets", "nested"]));
+    expect(await storage.listFiles(["secrets"])).toEqual(["a.txt", "b.txt"]);
+    await expect(storage.listFiles([])).rejects.toThrow(StoragePathError);
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "does not list symlinks as regular files", async () => {
+      const base = await makeBase();
+      const storage = new Storage(join(base, "data"));
+      await storage.writeFile(["secrets", "real.txt"], "real");
+      await symlink(
+        storage.path(["secrets", "real.txt"]),
+        storage.path(["secrets", "link.txt"]),
+      );
+
+      expect(await storage.listFiles(["secrets"])).toEqual(["real.txt"]);
+    },
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "refuses to delete symlinks or directories", async () => {
+      const base = await makeBase();
+      const storage = new Storage(join(base, "data"));
+      await storage.ensureDir([]);
+      const outside = join(base, "outside.txt");
+      await writeFile(outside, "keep");
+      await symlink(outside, join(storage.root, "link.txt"));
+      await mkdir(storage.path(["a-directory"]));
+
+      await expect(storage.deleteFile(["link.txt"])).rejects.toThrow(
+        StoragePathError,
+      );
+      await expect(storage.deleteFile(["a-directory"])).rejects.toThrow(
+        StoragePathError,
+      );
+      expect(await readFile(outside, "utf8")).toBe("keep");
+      expect((await stat(storage.path(["a-directory"]))).isDirectory()).toBe(true);
+    },
+  );
+
   it.skipIf(process.platform === "win32")(
     "rejects symlinked directories inside the data root",
     async () => {

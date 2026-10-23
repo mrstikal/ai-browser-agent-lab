@@ -5,11 +5,13 @@ import {
   lstat,
   mkdir,
   open,
+  readdir,
   rename,
   unlink,
 } from "node:fs/promises";
 import {
   basename,
+  dirname,
   isAbsolute,
   join,
   parse,
@@ -337,6 +339,45 @@ export class Storage {
         { cause: error },
       );
     }
+  }
+
+  async deleteFile(segments: readonly string[]): Promise<boolean> {
+    this.requireFileSegments(segments);
+    const target = this.path(segments);
+    await assertNoSymlinkComponents(this.root, target);
+
+    let info;
+    try {
+      info = await lstat(target);
+    } catch (error) {
+      if (isNotFound(error)) return false;
+      throw error;
+    }
+    if (!info.isFile()) {
+      throw new StoragePathError(
+        `Refusing to delete a non-regular file at ${target}.`,
+      );
+    }
+
+    await unlink(target);
+    await syncDirectory(dirname(target));
+    return true;
+  }
+
+  async listFiles(segments: readonly string[]): Promise<string[]> {
+    this.requireFileSegments(segments);
+    const dir = this.path(segments);
+    await assertNoSymlinkComponents(this.root, dir);
+    const entries = await readdir(dir, { withFileTypes: true }).catch(
+      (error: unknown) => {
+        if (isNotFound(error)) return [] as const;
+        throw error;
+      },
+    );
+    return entries
+      .filter((entry) => entry.isFile())
+      .map((entry) => entry.name)
+      .sort();
   }
 
   async appendJsonLine(
