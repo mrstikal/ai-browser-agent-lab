@@ -3,6 +3,7 @@ import {
   IMAGE_PROMPT_PREFIX,
   IMAGE_PROMPT_SUFFIX,
   PRODUCT_CATEGORIES,
+  findProductBySlug,
   products,
   slugifyProductName,
 } from "../src/lib/products";
@@ -238,6 +239,17 @@ describe("product fixture", () => {
       expect(product.slug).toBe(slugifyProductName(product.name));
       expect(product.slug).toMatch(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
     }
+  });
+
+  it("finds products by exact slug and rejects unknown slugs", () => {
+    for (const product of products) {
+      expect(findProductBySlug(product.slug)?.id).toBe(product.id);
+    }
+    expect(findProductBySlug("pebble-plant-pot")?.id).toBe("P19");
+    expect(findProductBySlug("Pebble-Plant-Pot")).toBeUndefined();
+    expect(findProductBySlug("pebble-plant-pot-extra")).toBeUndefined();
+    expect(findProductBySlug("not-a-product")).toBeUndefined();
+    expect(findProductBySlug("")).toBeUndefined();
   });
 
   it("preserves the released P19 slug", () => {

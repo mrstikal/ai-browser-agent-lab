@@ -371,3 +371,7 @@ export const products = [
 
 export type ProductId = (typeof products)[number]["id"];
 export type ProductSlug = (typeof products)[number]["slug"];
+
+export function findProductBySlug(slug: string): Product | undefined {
+  return products.find((product) => product.slug === slug);
+}

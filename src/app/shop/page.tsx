@@ -1,10 +1,84 @@
-import { PageStub } from "@/components/page-stub";
+import type { Metadata } from "next";
+import { CatalogFilters } from "@/components/catalog-filters";
+import { CatalogPagination } from "@/components/catalog-pagination";
+import { ProductCard } from "@/components/product-card";
+import {
+  CATALOG_PAGE_SIZE,
+  parseCatalogQuery,
+  selectCatalogPage,
+} from "@/lib/catalog";
+import { products } from "@/lib/products";
 
-export default function ShopPage() {
+export const metadata: Metadata = {
+  title: "Shop",
+};
+
+interface ShopPageProps {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}
+
+export default async function ShopPage({ searchParams }: ShopPageProps) {
+  const query = parseCatalogQuery(await searchParams);
+  const result = selectCatalogPage(products, query);
+  const start =
+    result.total === 0 ? 0 : (result.page - 1) * CATALOG_PAGE_SIZE + 1;
+  const end =
+    result.total === 0
+      ? 0
+      : Math.min(result.page * CATALOG_PAGE_SIZE, result.total);
+  const countLabel =
+    result.total === 0
+      ? "0 products."
+      : result.total === 1
+        ? "Showing 1 product."
+        : `Showing ${start}–${end} of ${result.total} products.`;
+
   return (
-    <PageStub
-      title="Shop"
-      description="The catalog will list the fixed 24 products with six items per unfiltered page, search, category and stock filters, price sorting, and local image placeholders."
-    />
+    <div className="space-y-6">
+      <header className="space-y-2">
+        <h1 className="text-3xl font-semibold tracking-tight">Shop</h1>
+        <p className="max-w-2xl text-slate-600">
+          Browse the fixed 24-product catalog. Images are local placeholders until the
+          setup batch runs.
+        </p>
+      </header>
+
+      <CatalogFilters query={query} />
+
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <p aria-live="polite" className="text-sm text-slate-600">
+          {countLabel}
+        </p>
+        {result.pageCount > 1 ? (
+          <p className="text-sm text-slate-600">
+            Page {result.page} of {result.pageCount}
+          </p>
+        ) : null}
+      </div>
+
+      {result.items.length === 0 ? (
+        <section
+          aria-labelledby="no-products"
+          className="rounded-xl border border-dashed border-slate-300 bg-white p-8 text-center"
+        >
+          <h2 id="no-products" className="text-xl font-semibold">
+            No products found
+          </h2>
+          <p className="mt-2 text-slate-600">
+            Try a different search or clear the filters above.
+          </p>
+        </section>
+      ) : (
+        <ul className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+          {result.items.map((product) => (
+            <li key={product.id}>
+              <ProductCard product={product} />
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <CatalogPagination result={result} />
+    </div>
   );
 }

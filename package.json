@@ -15,7 +15,8 @@
     "typecheck": "node scripts/check-node.mjs && NEXT_TELEMETRY_DISABLED=1 next typegen && tsc --noEmit",
     "test": "vitest run",
     "check:runtime": "node scripts/check-node.mjs",
-    "smoke:browser-local": "node scripts/check-node.mjs && tsx scripts/browser-smoke.ts"
+    "smoke:browser-local": "node scripts/check-node.mjs && tsx scripts/browser-smoke.ts",
+    "test:e2e": "node scripts/check-node.mjs && node scripts/run-e2e.mjs"
   },
   "dependencies": {
     "@browser_use/pi": "0.1.0",
@@ -25,6 +26,7 @@
     "tsx": "4.23.15"
   },
   "devDependencies": {
+    "@playwright/test": "1.64.1",
     "@tailwindcss/postcss": "4.3.3",
     "@types/node": "22.20.5",
     "@types/react": "19.3.0",
