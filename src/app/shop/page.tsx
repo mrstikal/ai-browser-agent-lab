@@ -8,6 +8,8 @@ import {
   selectCatalogPage,
 } from "@/lib/catalog";
 import { products } from "@/lib/products";
+import { loadDeliverableImages } from "@/server/image-delivery";
+import { createStorage } from "@/server/storage";
 
 export const metadata: Metadata = {
   title: "Shop",
@@ -20,6 +22,7 @@ interface ShopPageProps {
 export default async function ShopPage({ searchParams }: ShopPageProps) {
   const query = parseCatalogQuery(await searchParams);
   const result = selectCatalogPage(products, query);
+  const deliverable = await loadDeliverableImages(createStorage());
   const start =
     result.total === 0 ? 0 : (result.page - 1) * CATALOG_PAGE_SIZE + 1;
   const end =
@@ -38,8 +41,8 @@ export default async function ShopPage({ searchParams }: ShopPageProps) {
       <header className="space-y-2">
         <h1 className="text-3xl font-semibold tracking-tight">Shop</h1>
         <p className="max-w-2xl text-slate-600">
-          Browse the fixed 24-product catalog. Images are local placeholders until the
-          setup batch runs.
+          Browse the fixed 24-product catalog. Validated generated images appear as they are
+          delivered; every missing or invalid image stays on its local placeholder.
         </p>
       </header>
 
@@ -72,7 +75,10 @@ export default async function ShopPage({ searchParams }: ShopPageProps) {
         <ul className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
           {result.items.map((product) => (
             <li key={product.id}>
-              <ProductCard product={product} />
+              <ProductCard
+                product={product}
+                imageUrl={deliverable.get(product.id)?.url ?? null}
+              />
             </li>
           ))}
         </ul>

@@ -1,4 +1,13 @@
 import { expect, test } from "@playwright/test";
+import { rm } from "node:fs/promises";
+import { join } from "node:path";
+
+test.beforeEach(async () => {
+  const dataDir = process.env.DATA_DIR;
+  if (dataDir) {
+    await rm(join(dataDir, "images"), { recursive: true, force: true });
+  }
+});
 import { products } from "../../src/lib/products";
 
 test.describe("product detail URLs", () => {

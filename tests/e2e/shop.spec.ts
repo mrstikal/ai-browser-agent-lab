@@ -1,4 +1,13 @@
 import { expect, test, type Page } from "@playwright/test";
+import { rm } from "node:fs/promises";
+import { join } from "node:path";
+
+test.beforeEach(async () => {
+  const dataDir = process.env.DATA_DIR;
+  if (dataDir) {
+    await rm(join(dataDir, "images"), { recursive: true, force: true });
+  }
+});
 
 const defaultPages = [
   ["P01", "P02", "P03", "P04", "P05", "P06"],

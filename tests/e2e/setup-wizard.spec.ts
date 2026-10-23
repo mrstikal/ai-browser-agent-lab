@@ -13,6 +13,11 @@ test.beforeEach(async () => {
   await rm(join(dataDir, "images"), { recursive: true, force: true });
 });
 
+test.afterAll(async () => {
+  if (!dataDir) return;
+  await rm(join(dataDir, "images"), { recursive: true, force: true });
+});
+
 function attemptId(index: number): string {
   return `00000000-0000-4000-8000-${index.toString(16).padStart(12, "0")}`;
 }

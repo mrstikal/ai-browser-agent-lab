@@ -1,8 +1,15 @@
+import Image from "next/image";
 import Link from "next/link";
 import { formatUsd } from "@/lib/format";
 import type { Product } from "@/lib/products";
 
-export function ProductCard({ product }: { product: Product }) {
+export function ProductCard({
+  product,
+  imageUrl = null,
+}: {
+  product: Product;
+  imageUrl?: string | null;
+}) {
   const inStock = product.stock > 0;
   const nameId = `product-${product.id}-name`;
 
@@ -12,15 +19,26 @@ export function ProductCard({ product }: { product: Product }) {
       aria-labelledby={nameId}
       className="flex h-full flex-col overflow-hidden rounded-xl border border-slate-200 bg-white"
     >
-      <div
-        role="img"
-        aria-label={`Placeholder image for ${product.name}`}
-        className="flex aspect-square items-center justify-center border-b border-slate-200 bg-slate-100"
-      >
-        <span aria-hidden="true" className="text-4xl font-semibold text-slate-400">
-          {product.name.charAt(0)}
-        </span>
-      </div>
+      {imageUrl ? (
+        <Image
+          src={imageUrl}
+          alt={product.name}
+          width={768}
+          height={768}
+          unoptimized
+          className="aspect-square w-full border-b border-slate-200 bg-slate-100 object-cover"
+        />
+      ) : (
+        <div
+          role="img"
+          aria-label={`Placeholder image for ${product.name}`}
+          className="flex aspect-square items-center justify-center border-b border-slate-200 bg-slate-100"
+        >
+          <span aria-hidden="true" className="text-4xl font-semibold text-slate-400">
+            {product.name.charAt(0)}
+          </span>
+        </div>
+      )}
       <div className="flex flex-1 flex-col gap-2 p-4">
         <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
           {product.category}

@@ -1,8 +1,13 @@
 import type { Metadata } from "next";
+import Image from "next/image";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { formatUsd } from "@/lib/format";
 import { findProductBySlug } from "@/lib/products";
+import { loadDeliverableImages } from "@/server/image-delivery";
+import { createStorage } from "@/server/storage";
+
+export const dynamic = "force-dynamic";
 
 interface ProductPageProps {
   params: Promise<{ slug: string }>;
@@ -25,6 +30,8 @@ export default async function ProductPage({ params }: ProductPageProps) {
   const product = findProductBySlug(slug);
   if (!product) notFound();
 
+  const deliverable = await loadDeliverableImages(createStorage());
+  const imageUrl = deliverable.get(product.id)?.url ?? null;
   const inStock = product.stock > 0;
 
   return (
@@ -48,15 +55,26 @@ export default async function ProductPage({ params }: ProductPageProps) {
       </nav>
 
       <div className="grid gap-8 lg:grid-cols-2">
-        <div
-          role="img"
-          aria-label={`Placeholder image for ${product.name}`}
-          className="flex aspect-square items-center justify-center rounded-xl border border-slate-200 bg-slate-100"
-        >
-          <span aria-hidden="true" className="text-6xl font-semibold text-slate-400">
-            {product.name.charAt(0)}
-          </span>
-        </div>
+        {imageUrl ? (
+          <Image
+            src={imageUrl}
+            alt={product.name}
+            width={768}
+            height={768}
+            unoptimized
+            className="aspect-square w-full rounded-xl border border-slate-200 bg-slate-100 object-cover"
+          />
+        ) : (
+          <div
+            role="img"
+            aria-label={`Placeholder image for ${product.name}`}
+            className="flex aspect-square items-center justify-center rounded-xl border border-slate-200 bg-slate-100"
+          >
+            <span aria-hidden="true" className="text-6xl font-semibold text-slate-400">
+              {product.name.charAt(0)}
+            </span>
+          </div>
+        )}
 
         <div className="space-y-4">
           <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
