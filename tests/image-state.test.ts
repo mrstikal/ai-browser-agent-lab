@@ -118,6 +118,7 @@ function jobSnapshot(
       error: null,
     })),
     stopRequest: null,
+    quote: null,
     error: null,
   };
 }

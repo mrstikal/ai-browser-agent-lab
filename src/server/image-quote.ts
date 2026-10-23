@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
-import { imageModelSettingsSchema, type ImageModelSelection } from "../lib/schemas";
+import {
+  imageModelSettingsSchema,
+  QUOTE_ATTEMPTS_PER_IMAGE,
+  type ImageModelSelection,
+} from "../lib/schemas";
 import type { ProductId } from "../lib/products";
 import {
   fetchImageModelCapabilities,
@@ -15,7 +19,7 @@ import { loadModelSettings } from "./model-settings";
 import { Storage, type StorageEnv } from "./storage";
 import { formatUsdMicro, parseUsdToMicro } from "./usd";
 
-export const QUOTE_ATTEMPTS_PER_IMAGE = 3;
+export { QUOTE_ATTEMPTS_PER_IMAGE };
 export const QUOTE_PER_REQUEST_FLOOR_USD = "1.00";
 
 export type ImageQuoteCode =

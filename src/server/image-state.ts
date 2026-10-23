@@ -1,6 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { link, lstat, readdir, rename, unlink } from "node:fs/promises";
 import { join } from "node:path";
+import {
+  imageModelSettingsSchema,
+  QUOTE_ATTEMPTS_PER_IMAGE,
+  type ImageModelSelection,
+} from "../lib/schemas";
 import { products, type ProductId } from "../lib/products";
 import {
   MAX_IMAGE_BYTES,
@@ -17,7 +22,7 @@ import {
   type ValidatedImage,
 } from "./image-validation";
 import { Storage, StorageCorruptionError } from "./storage";
-import { formatUsdMicro } from "./usd";
+import { formatUsdMicro, parseUsdToMicro } from "./usd";
 
 export const IMAGE_MANIFEST_VERSION = 1;
 export const IMAGE_JOB_VERSION = 1;
@@ -103,6 +108,22 @@ export interface ImageJobStopRequest {
   readonly requestedAt: string;
 }
 
+export interface ImageJobQuote {
+  readonly fingerprint: string;
+  readonly selection: ImageModelSelection;
+  readonly providerSlug: string;
+  readonly providerTag: string | null;
+  readonly providerOnly: string[];
+  readonly unitPriceUsd: string;
+  readonly baseUsd: string;
+  readonly worstCaseUsd: string;
+  readonly startingBalanceBaseUsd: string;
+  readonly startingBalanceWorstCaseUsd: string;
+  readonly perRequestFloorUsd: string;
+  readonly attemptsPerImage: number;
+  readonly imageCount: number;
+}
+
 export interface ImageJobSnapshot {
   readonly version: typeof IMAGE_JOB_VERSION;
   readonly jobId: string;
@@ -111,6 +132,7 @@ export interface ImageJobSnapshot {
   readonly updatedAt: string;
   readonly targets: ImageJobTarget[];
   readonly stopRequest: ImageJobStopRequest | null;
+  readonly quote: ImageJobQuote | null;
   readonly error: string | null;
 }
 
@@ -1250,6 +1272,67 @@ async function reconcileImagesUnlocked(
   };
 }
 
+function readUsdAmount(value: unknown, label: string): string {
+  if (typeof value !== "string") corrupted(`${label} must be a decimal USD string.`);
+  try {
+    parseUsdToMicro(value);
+  } catch {
+    corrupted(`${label} must be a decimal USD string.`);
+  }
+  return value;
+}
+
+function parseImageJobQuote(value: unknown): ImageJobQuote {
+  if (!isRecord(value)) corrupted("job.quote must be an object.");
+  if (typeof value.fingerprint !== "string" || !/^[0-9a-f]{64}$/.test(value.fingerprint)) {
+    corrupted("job.quote.fingerprint must be a SHA-256 hex digest.");
+  }
+  const selection = imageModelSettingsSchema.safeParse(value.selection);
+  if (!selection.success) corrupted("job.quote.selection is invalid.");
+  if (
+    !Array.isArray(value.providerOnly) ||
+    value.providerOnly.length > 5 ||
+    value.providerOnly.some(
+      (provider) => typeof provider !== "string" || provider.length === 0 || provider.length > 64,
+    )
+  ) {
+    corrupted("job.quote.providerOnly is invalid.");
+  }
+  if (value.attemptsPerImage !== QUOTE_ATTEMPTS_PER_IMAGE) {
+    corrupted(
+      `job.quote.attemptsPerImage must be ${QUOTE_ATTEMPTS_PER_IMAGE}.`,
+    );
+  }
+  return {
+    fingerprint: value.fingerprint,
+    selection: selection.data,
+    providerSlug: readString(value.providerSlug, "job.quote.providerSlug", 64),
+    providerTag: readNullableString(
+      value.providerTag,
+      "job.quote.providerTag",
+      64,
+    ),
+    providerOnly: value.providerOnly,
+    unitPriceUsd: readUsdAmount(value.unitPriceUsd, "job.quote.unitPriceUsd"),
+    baseUsd: readUsdAmount(value.baseUsd, "job.quote.baseUsd"),
+    worstCaseUsd: readUsdAmount(value.worstCaseUsd, "job.quote.worstCaseUsd"),
+    startingBalanceBaseUsd: readUsdAmount(
+      value.startingBalanceBaseUsd,
+      "job.quote.startingBalanceBaseUsd",
+    ),
+    startingBalanceWorstCaseUsd: readUsdAmount(
+      value.startingBalanceWorstCaseUsd,
+      "job.quote.startingBalanceWorstCaseUsd",
+    ),
+    perRequestFloorUsd: readUsdAmount(
+      value.perRequestFloorUsd,
+      "job.quote.perRequestFloorUsd",
+    ),
+    attemptsPerImage: QUOTE_ATTEMPTS_PER_IMAGE,
+    imageCount: readInteger(value.imageCount, "job.quote.imageCount", 1, 24),
+  };
+}
+
 export function parseImageJobSnapshot(value: unknown): ImageJobSnapshot {
   if (!isRecord(value)) corrupted("job snapshot must be an object.");
   if (value.version !== IMAGE_JOB_VERSION) {
@@ -1327,7 +1410,7 @@ export function parseImageJobSnapshot(value: unknown): ImageJobSnapshot {
   }
 
   let stopRequest: ImageJobStopRequest | null = null;
-  if (value.stopRequest !== null) {
+  if (value.stopRequest !== null && value.stopRequest !== undefined) {
     if (!isRecord(value.stopRequest)) {
       corrupted("job.stopRequest must be an object or null.");
     }
@@ -1352,6 +1435,13 @@ export function parseImageJobSnapshot(value: unknown): ImageJobSnapshot {
   }
 
   const error = readNullableString(value.error, "job.error", 2000);
+  let quote: ImageJobQuote | null = null;
+  if (value.quote !== undefined && value.quote !== null) {
+    quote = parseImageJobQuote(value.quote);
+    if (quote.imageCount !== targets.length) {
+      corrupted("job.quote.imageCount must match the number of targets.");
+    }
+  }
 
   return {
     version: IMAGE_JOB_VERSION,
@@ -1361,6 +1451,7 @@ export function parseImageJobSnapshot(value: unknown): ImageJobSnapshot {
     updatedAt,
     targets,
     stopRequest,
+    quote,
     error,
   };
 }
@@ -1368,7 +1459,7 @@ export function parseImageJobSnapshot(value: unknown): ImageJobSnapshot {
 export function createImageJobSnapshot(options: {
   readonly jobId: string;
   readonly productIds: readonly ProductId[];
-  readonly now?: Date;
+  readonly now?: Date | undefined;
 }): ImageJobSnapshot {
   if (!isUuid(options.jobId)) {
     throw new ImageStateError(`Invalid job ID: ${String(options.jobId)}.`);
@@ -1400,6 +1491,7 @@ export function createImageJobSnapshot(options: {
       error: null,
     })),
     stopRequest: null,
+    quote: null,
     error: null,
   };
 }

@@ -3,6 +3,7 @@ import { z } from "zod";
 export const IMAGE_RESOLUTION_TIERS = ["512", "768", "1K", "1.5K", "2K", "4K"] as const;
 export const IMAGE_OUTPUT_FORMATS = ["png", "jpeg", "webp"] as const;
 export const MODEL_SETTINGS_VERSION = 1;
+export const QUOTE_ATTEMPTS_PER_IMAGE = 3;
 
 /**
  * Bounded model identifier. OpenRouter image IDs use `author/slug` and the
