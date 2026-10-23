@@ -1,11 +1,13 @@
 import Link from "next/link";
 import type { Metadata } from "next";
 import { createStorage } from "@/server/storage";
+import { loadImageProgress } from "@/server/image-progress";
 import { loadSetupView } from "@/server/setup-view";
 import type { SetupStatus } from "@/server/image-state";
 import { ConfirmEstimateForm } from "./confirm-estimate-form";
 import { KeyForm } from "./key-form";
 import { ModelForm } from "./model-form";
+import { ProgressPanel } from "./progress-panel";
 
 export const dynamic = "force-dynamic";
 
@@ -24,6 +26,7 @@ const STATUS_LABELS: Record<SetupStatus, string> = {
 
 export default async function SetupPage() {
   const view = await loadSetupView(createStorage());
+  const progress = await loadImageProgress(createStorage());
 
   return (
     <div className="space-y-8">
@@ -145,6 +148,8 @@ export default async function SetupPage() {
           </div>
         )}
       </section>
+
+      <ProgressPanel key={progress.job.jobId ?? "no-job"} initial={progress} />
 
       <p className="text-sm text-slate-600">
         The catalog stays browsable with placeholders while images are missing:{" "}

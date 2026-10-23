@@ -33,7 +33,7 @@ export function ConfirmEstimateForm({
     setError(null);
     setMessage(null);
     try {
-      const response = await guardedJsonFetch("/api/setup/confirm", {
+      const response = await guardedJsonFetch("/api/images/job/start", {
         method: "POST",
         body: { confirm: true, fingerprint },
       });
@@ -43,7 +43,7 @@ export function ConfirmEstimateForm({
         return;
       }
       setMessage(
-        "Estimate confirmed at the displayed price. Nothing was billed; the batch start is a later phase.",
+        "Batch queued at the displayed price. Progress updates appear below; no other targets are requested.",
       );
       router.refresh();
     } catch {
@@ -80,14 +80,14 @@ export function ConfirmEstimateForm({
           className="mt-0.5"
         />
         I have reviewed the missing images, the current unit price, and the indicative starting
-        balance. Nothing is billed until a later phase starts the batch.
+        balance. Confirming starts the batch and may incur the displayed charges.
       </label>
       <button
         type="submit"
         disabled={!confirmed || busy}
         className="rounded bg-slate-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
       >
-        {busy ? "Confirming..." : "Confirm estimate"}
+        {busy ? "Starting..." : "Confirm and start batch"}
       </button>
       {message ? (
         <p role="status" className="text-sm text-emerald-700">
