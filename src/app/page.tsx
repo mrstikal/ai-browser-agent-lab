@@ -1,10 +1,15 @@
 import Link from "next/link";
+import { redirect } from "next/navigation";
+import { createStorage } from "@/server/storage";
+import { loadSetupView } from "@/server/setup-view";
+
+export const dynamic = "force-dynamic";
 
 const entryPoints = [
   {
     href: "/setup",
     title: "Setup",
-    description: "Enter an OpenRouter key and prepare the generated product images.",
+    description: "Validate the key, choose models, and review the image estimate.",
   },
   {
     href: "/shop",
@@ -28,7 +33,12 @@ const entryPoints = [
   },
 ] as const;
 
-export default function HomePage() {
+export default async function HomePage() {
+  const view = await loadSetupView(createStorage(), { skipQuote: true });
+  if (view.setupError || view.setup.status !== "completed") {
+    redirect("/setup");
+  }
+
   return (
     <div className="space-y-8">
       <section className="space-y-3">
@@ -40,7 +50,7 @@ export default function HomePage() {
         </h1>
         <p className="max-w-2xl text-slate-600">
           A local storefront with generated product images and a real Chromium browser agent.
-          This shell is the foundation for the setup, catalog, forms, and agent phases.
+          All 24 images validate, so the setup wizard is complete.
         </p>
       </section>
 
