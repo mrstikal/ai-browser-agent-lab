@@ -34,6 +34,20 @@ describe("resolveAppConfig", () => {
     });
   });
 
+  it("keeps the bind host and port consistent with the origin", () => {
+    for (const raw of [
+      "http://127.0.0.1:4123",
+      "http://localhost:4123",
+      "http://[::1]:4123",
+    ]) {
+      const config = resolveAppConfig({ APP_ORIGIN: raw });
+      const url = new URL(config.origin);
+      expect(url.port).toBe(String(config.port));
+      expect(url.hostname).toBe(config.hostname);
+      expect(["127.0.0.1", "::1"]).toContain(config.bindHost);
+    }
+  });
+
   it("accepts a trailing slash as part of the origin", () => {
     expect(resolveAppConfig({ APP_ORIGIN: "http://127.0.0.1:4123/" }).origin).toBe(
       "http://127.0.0.1:4123",

@@ -1,9 +1,10 @@
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { resolveAppConfig } from "../src/server/config";
+import { buildNextArgs, nextLaunchTarget, type NextMode } from "./next-args";
 
 const MODES = ["dev", "build", "start"] as const;
-type Mode = (typeof MODES)[number];
+type Mode = NextMode;
 
 function isMode(value: string | undefined): value is Mode {
   return value !== undefined && (MODES as readonly string[]).includes(value);
@@ -27,13 +28,9 @@ const config = (() => {
 })();
 
 const nextBin = createRequire(import.meta.url).resolve("next/dist/bin/next");
-const args = [nextBin, mode];
-if (mode !== "build") {
-  args.push("--hostname", config.bindHost, "--port", String(config.port));
-}
+const args = [nextBin, ...buildNextArgs(mode, config)];
 
-const target = mode === "build" ? "" : ` on ${config.origin} (bind ${config.bindHost}:${config.port})`;
-console.log(`[ai-browser-agent-lab] next ${mode}${target}`);
+console.log(`[ai-browser-agent-lab] next ${mode}${nextLaunchTarget(mode, config)}`);
 
 const child = spawn(process.execPath, args, {
   stdio: "inherit",
