@@ -20,6 +20,7 @@ import {
   Storage,
   StorageConfigError,
   StorageCorruptionError,
+  StorageExistsError,
   StorageLimitError,
   StoragePathError,
   createStorage,
@@ -105,6 +106,26 @@ describe("storage foundation", () => {
     expect(storage.path(["images", "P01.png"])).toBe(
       join(storage.root, "images", "P01.png"),
     );
+  });
+
+  it("writes a file exclusively without replacing an existing target", async () => {
+    const storage = await makeStorage();
+    await storage.writeFileExclusive(["images", "P01-attempt.png"], "first");
+    expect(await storage.readFile(["images", "P01-attempt.png"])).toEqual(
+      Buffer.from("first"),
+    );
+
+    await expect(
+      storage.writeFileExclusive(["images", "P01-attempt.png"], "second"),
+    ).rejects.toThrow(StorageExistsError);
+    expect(await storage.readFile(["images", "P01-attempt.png"])).toEqual(
+      Buffer.from("first"),
+    );
+    if (process.platform !== "win32") {
+      expect(
+        (await stat(storage.path(["images", "P01-attempt.png"]))).mode & 0o777,
+      ).toBe(0o600);
+    }
   });
 
   it("deletes files idempotently and reports missing paths", async () => {

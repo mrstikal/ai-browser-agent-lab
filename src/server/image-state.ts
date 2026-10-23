@@ -17,6 +17,7 @@ import {
   type ValidatedImage,
 } from "./image-validation";
 import { Storage, StorageCorruptionError } from "./storage";
+import { formatUsdMicro } from "./usd";
 
 export const IMAGE_MANIFEST_VERSION = 1;
 export const IMAGE_JOB_VERSION = 1;
@@ -171,6 +172,33 @@ export interface DeriveSetupStateInput {
   readonly validImageIds: readonly ProductId[];
   readonly job?: ImageJobSnapshot | undefined;
   readonly jobIsLive?: boolean | undefined;
+}
+
+const MANIFEST_QUEUES = new Map<string, Promise<void>>();
+
+/**
+ * Serializes manifest read-modify-write operations per data root so a caller
+ * can never publish a pre-request snapshot over another writer's attempt
+ * records. Reentrant use inside the same task is not supported.
+ */
+export function withImageManifestLock<T>(
+  storage: Storage,
+  task: () => Promise<T>,
+): Promise<T> {
+  const key = storage.root;
+  const previous = MANIFEST_QUEUES.get(key) ?? Promise.resolve();
+  const run = previous.then(task, task);
+  const settled = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  MANIFEST_QUEUES.set(key, settled);
+  void settled.finally(() => {
+    if (MANIFEST_QUEUES.get(key) === settled) {
+      MANIFEST_QUEUES.delete(key);
+    }
+  });
+  return run;
 }
 
 export class ImageStateError extends Error {
@@ -1048,8 +1076,6 @@ function finishTimeAtOrAfter(startedAt: string, now: Date): Date {
   return now.getTime() < started ? new Date(started) : now;
 }
 
-let reconcileChain: Promise<void> = Promise.resolve();
-
 export function isActiveImageJobStatus(status: ImageJobStatus): boolean {
   return status === "queued" || status === "running" || status === "stopping";
 }
@@ -1065,12 +1091,9 @@ export function reconcileImages(
   storage: Storage,
   options: ReconcileOptions = {},
 ): Promise<ReconcileResult> {
-  const run = reconcileChain.then(() => reconcileImagesUnlocked(storage, options));
-  reconcileChain = run.then(
-    () => undefined,
-    () => undefined,
+  return withImageManifestLock(storage, () =>
+    reconcileImagesUnlocked(storage, options),
   );
-  return run;
 }
 
 async function reconcileImagesUnlocked(
@@ -1539,6 +1562,19 @@ export async function inspectSetupState(
     job,
     jobIsLive: options.jobIsLive,
   });
+}
+
+/**
+ * Exact micro-USD view of an attempt cost for totals; null for unknown or
+ * values that cannot be represented at six decimals. Never sum `cost.usd`
+ * floats directly.
+ */
+export function imageCostToMicro(cost: ImageCost): bigint | null {
+  if (cost.kind === "unknown") return null;
+  if (!Number.isFinite(cost.usd) || cost.usd < 0) return null;
+  const micro = BigInt(Math.round(cost.usd * 1_000_000));
+  if (Number(formatUsdMicro(micro)) !== cost.usd) return null;
+  return micro;
 }
 
 export function attemptFilename(

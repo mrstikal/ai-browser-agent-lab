@@ -221,14 +221,15 @@ export type FetchOpenRouterJsonResult =
       readonly kind: "network" | "timeout" | "invalid-response";
     };
 
-/**
- * Shared guarded GET for OpenRouter JSON endpoints: fixed base URL from the
- * resolver, redirects rejected, whole-operation timeout (headers and body),
- * bounded response size, and no raw error passthrough.
- */
-export async function fetchOpenRouterJson(
+interface OpenRouterJsonRequest {
+  readonly method: "GET" | "POST";
+  readonly body?: string;
+}
+
+async function executeOpenRouterJsonRequest(
   url: string,
-  options: FetchOpenRouterJsonOptions = {},
+  request: OpenRouterJsonRequest,
+  options: FetchOpenRouterJsonOptions,
 ): Promise<FetchOpenRouterJsonResult> {
   const fetchImpl = options.fetchImpl ?? fetch;
   const timeoutMs = positiveInteger(
@@ -247,13 +248,15 @@ export async function fetchOpenRouterJson(
   try {
     let response: Response;
     try {
-      response = await fetchImpl(url, {
-        method: "GET",
+      const init: RequestInit = {
+        method: request.method,
         headers: { accept: "application/json", ...options.headers },
         redirect: "error",
         cache: "no-store",
         signal: controller.signal,
-      });
+      };
+      if (request.body !== undefined) init.body = request.body;
+      response = await fetchImpl(url, init);
     } catch {
       if (controller.signal.aborted) return { ok: false, kind: "timeout" };
       return { ok: false, kind: "network" };
@@ -282,6 +285,37 @@ export async function fetchOpenRouterJson(
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * Shared guarded GET for OpenRouter JSON endpoints: fixed base URL from the
+ * resolver, redirects rejected, whole-operation timeout (headers and body),
+ * bounded response size, and no raw error passthrough.
+ */
+export async function fetchOpenRouterJson(
+  url: string,
+  options: FetchOpenRouterJsonOptions = {},
+): Promise<FetchOpenRouterJsonResult> {
+  return executeOpenRouterJsonRequest(url, { method: "GET" }, options);
+}
+
+/**
+ * Guarded POST for OpenRouter JSON endpoints. Use only from adapters that
+ * already hold a confirmed quote; the body is serialized here and never logged.
+ */
+export async function postOpenRouterJson(
+  url: string,
+  body: unknown,
+  options: FetchOpenRouterJsonOptions = {},
+): Promise<FetchOpenRouterJsonResult> {
+  return executeOpenRouterJsonRequest(
+    url,
+    { method: "POST", body: JSON.stringify(body) },
+    {
+      ...options,
+      headers: { "content-type": "application/json", ...options.headers },
+    },
+  );
 }
 
 /**

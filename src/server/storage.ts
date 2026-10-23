@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import {
   chmod,
+  link,
   lstat,
   mkdir,
   open,
@@ -61,6 +62,13 @@ export class StorageCorruptionError extends StorageError {
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
     this.name = "StorageCorruptionError";
+  }
+}
+
+export class StorageExistsError extends StorageError {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "StorageExistsError";
   }
 }
 
@@ -299,6 +307,53 @@ export class Storage {
         await handle.close();
       }
       await rename(tempPath, target);
+      tempCreated = false;
+      await syncDirectory(dir);
+    } finally {
+      if (tempCreated) {
+        await unlink(tempPath).catch(() => undefined);
+      }
+    }
+  }
+
+  /**
+   * Like writeFile, but fails with StorageExistsError instead of replacing an
+   * existing target. Used for per-attempt image files that must never be
+   * overwritten, even by a same-named concurrent writer.
+   */
+  async writeFileExclusive(
+    segments: readonly string[],
+    data: string | Uint8Array,
+  ): Promise<void> {
+    this.requireFileSegments(segments);
+    const target = this.path(segments);
+    const dir = await this.ensureDir(segments.slice(0, -1));
+    const tempPath = join(dir, `.${basename(target)}.${randomUUID()}.tmp`);
+    let tempCreated = false;
+
+    try {
+      const handle = await open(tempPath, "wx", PRIVATE_FILE_MODE);
+      tempCreated = true;
+      try {
+        await handle.writeFile(data);
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+
+      try {
+        await link(tempPath, target);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+          throw new StorageExistsError(
+            `Refusing to overwrite the existing file at ${target}.`,
+            { cause: error },
+          );
+        }
+        throw error;
+      }
+
+      await unlink(tempPath);
       tempCreated = false;
       await syncDirectory(dir);
     } finally {
