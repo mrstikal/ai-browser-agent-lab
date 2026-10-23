@@ -2,3 +2,13 @@
 /agent-memory
 /AGENTS.md
 /AI_BROWSER_LAB_IMPLEMENTATION_PLAN_base.md
+/node_modules/
+/.next/
+/data/
+/coverage/
+/playwright-report/
+/test-results/
+/blob-report/
+/.eslintcache
+*.tsbuildinfo
+.env*
