@@ -206,6 +206,84 @@ async function readBoundedResponseText(
   return { ok: true, text: Buffer.concat(chunks).toString("utf8") };
 }
 
+export interface FetchOpenRouterJsonOptions {
+  readonly headers?: Record<string, string> | undefined;
+  readonly fetchImpl?: typeof fetch | undefined;
+  readonly timeoutMs?: number | undefined;
+  readonly maxBytes?: number | undefined;
+}
+
+export type FetchOpenRouterJsonResult =
+  | { readonly ok: true; readonly status: number; readonly json: unknown }
+  | { readonly ok: false; readonly kind: "http"; readonly status: number }
+  | {
+      readonly ok: false;
+      readonly kind: "network" | "timeout" | "invalid-response";
+    };
+
+/**
+ * Shared guarded GET for OpenRouter JSON endpoints: fixed base URL from the
+ * resolver, redirects rejected, whole-operation timeout (headers and body),
+ * bounded response size, and no raw error passthrough.
+ */
+export async function fetchOpenRouterJson(
+  url: string,
+  options: FetchOpenRouterJsonOptions = {},
+): Promise<FetchOpenRouterJsonResult> {
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const timeoutMs = positiveInteger(
+    options.timeoutMs,
+    DEFAULT_KEY_VALIDATION_TIMEOUT_MS,
+    "timeoutMs",
+  );
+  const maxBytes = positiveInteger(
+    options.maxBytes,
+    DEFAULT_KEY_RESPONSE_MAX_BYTES,
+    "maxBytes",
+  );
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    let response: Response;
+    try {
+      response = await fetchImpl(url, {
+        method: "GET",
+        headers: { accept: "application/json", ...options.headers },
+        redirect: "error",
+        cache: "no-store",
+        signal: controller.signal,
+      });
+    } catch {
+      if (controller.signal.aborted) return { ok: false, kind: "timeout" };
+      return { ok: false, kind: "network" };
+    }
+
+    if (!response.ok) {
+      return { ok: false, kind: "http", status: response.status };
+    }
+
+    const body = await readBoundedResponseText(response, maxBytes);
+    if (!body.ok) {
+      if (body.code === "too-large") {
+        return { ok: false, kind: "invalid-response" };
+      }
+      if (controller.signal.aborted) return { ok: false, kind: "timeout" };
+      return { ok: false, kind: "network" };
+    }
+
+    let json: unknown;
+    try {
+      json = JSON.parse(body.text);
+    } catch {
+      return { ok: false, kind: "invalid-response" };
+    }
+    return { ok: true, status: response.status, json };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * Non-billable credential check against GET /key. It returns only safe status
  * fields: no key, label, usage, limits, or other raw endpoint metadata.
@@ -229,63 +307,37 @@ export async function validateOpenRouterKey(
   );
   const url = openRouterEndpoint(resolveOpenRouterBaseUrl(env), "key");
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    let response: Response;
-    try {
-      response = await fetchImpl(url, {
-        method: "GET",
-        headers: {
-          authorization: `Bearer ${normalizedKey}`,
-          accept: "application/json",
-        },
-        redirect: "error",
-        cache: "no-store",
-        signal: controller.signal,
-      });
-    } catch {
-      if (controller.signal.aborted) {
-        return result("unavailable", { reason: "timeout" });
-      }
+  const fetched = await fetchOpenRouterJson(url, {
+    headers: { authorization: `Bearer ${normalizedKey}` },
+    fetchImpl,
+    timeoutMs,
+    maxBytes,
+  });
+  if (!fetched.ok) {
+    if (fetched.kind === "http") {
+      if (fetched.status === 401) return result("invalid", { httpStatus: 401 });
+      return result("unavailable", { httpStatus: fetched.status });
+    }
+    if (fetched.kind === "timeout") {
+      return result("unavailable", { reason: "timeout" });
+    }
+    if (fetched.kind === "network") {
       return result("unavailable", { reason: "network" });
     }
-
-    if (response.status === 401) return result("invalid", { httpStatus: 401 });
-    if (response.status !== 200) {
-      return result("unavailable", { httpStatus: response.status });
-    }
-
-    const body = await readBoundedResponseText(response, maxBytes);
-    if (!body.ok) {
-      if (body.code === "too-large") {
-        return result("invalid-response", { httpStatus: 200 });
-      }
-      if (controller.signal.aborted) {
-        return result("unavailable", { reason: "timeout" });
-      }
-      return result("unavailable", { reason: "network" });
-    }
-
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(body.text);
-    } catch {
-      return result("invalid-response", { httpStatus: 200 });
-    }
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-      return result("invalid-response", { httpStatus: 200 });
-    }
-    const data = (parsed as Record<string, unknown>).data;
-    if (typeof data !== "object" || data === null || Array.isArray(data)) {
-      return result("invalid-response", { httpStatus: 200 });
-    }
-
-    return result("valid", {
-      httpStatus: 200,
-      managementOnly: isManagementOnly(data as Record<string, unknown>),
-    });
-  } finally {
-    clearTimeout(timer);
+    return result("invalid-response", { httpStatus: 200 });
   }
+
+  const parsed = fetched.json;
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return result("invalid-response", { httpStatus: 200 });
+  }
+  const data = (parsed as Record<string, unknown>).data;
+  if (typeof data !== "object" || data === null || Array.isArray(data)) {
+    return result("invalid-response", { httpStatus: 200 });
+  }
+
+  return result("valid", {
+    httpStatus: 200,
+    managementOnly: isManagementOnly(data as Record<string, unknown>),
+  });
 }
