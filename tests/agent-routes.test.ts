@@ -8,9 +8,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as cancelRoute from "@/app/api/agent/runs/cancel/route";
 import * as runsRoute from "@/app/api/agent/runs/route";
 import * as statusRoute from "@/app/api/agent/status/route";
-import { saveAgentCompatibility } from "@/server/agent-compatibility";
+import * as verifyRoute from "@/app/api/agent/verify/route";
+import {
+  loadAgentCompatibility,
+  saveAgentCompatibility,
+} from "@/server/agent-compatibility";
 import {
   AGENT_CANCEL_GRACE_MS,
+  AGENT_VERIFICATION_LIMITS,
   AGENT_WATCHDOG_MARGIN_MS,
   readInstalledSdkVersion,
   resetAgentSupervisorForTests,
@@ -28,7 +33,9 @@ import {
   resetCredentialHolderForTests,
   setOpenRouterKey,
 } from "@/server/credentials";
+import { readLockMetadata } from "@/server/lock";
 import { DEFAULT_BROWSER_MODEL_ID } from "@/server/model-settings";
+import { PAID_JOB_LOCK_SEGMENTS } from "@/server/paid-lock";
 import { resetPaidOperationsForTests } from "@/server/paid-operation";
 import { createStorage } from "@/server/storage";
 
@@ -122,6 +129,19 @@ async function waitForRun(
     await sleep(25);
   }
   throw new Error("Timed out waiting for the route-started run to finish.");
+}
+
+async function waitForPaidLockRelease(timeoutMs = 10_000): Promise<void> {
+  const storage = createStorage();
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const lock = await readLockMetadata(
+      storage.path(PAID_JOB_LOCK_SEGMENTS),
+    ).catch(() => null);
+    if (!lock) return;
+    await sleep(25);
+  }
+  throw new Error("Timed out waiting for the paid lock release.");
 }
 
 beforeEach(async () => {
@@ -447,6 +467,138 @@ describe("agent run API routes", () => {
       );
       expect(extended.status).toBe(422);
       expect((await getStatus()).runs).toHaveLength(0);
+    },
+  );
+});
+
+describe("agent verification API route", () => {
+  it("requires a guarded, explicit cost confirmation and a key", async () => {
+    const missingOrigin = await verifyRoute.POST(
+      makeRequest("/api/agent/verify", { confirmCost: true }, {
+        originHeader: null,
+      }),
+    );
+    expect(missingOrigin.status).toBe(403);
+    expect(
+      ((await missingOrigin.json()) as { error: { code: string } }).error.code,
+    ).toBe("missing-csrf-token");
+
+    const unconfirmed = await verifyRoute.POST(
+      makeRequest("/api/agent/verify", {}),
+    );
+    expect(unconfirmed.status).toBe(422);
+    expect(
+      ((await unconfirmed.json()) as { error: { code: string } }).error.code,
+    ).toBe("invalid-body");
+
+    const noKey = await verifyRoute.POST(
+      makeRequest("/api/agent/verify", { confirmCost: true }),
+    );
+    expect(noKey.status).toBe(409);
+    expect(
+      ((await noKey.json()) as { error: { code: string } }).error.code,
+    ).toBe("key-required");
+
+    const status = await getStatus();
+    expect(status.gate.verified).toBe(false);
+    expect(status.runs).toHaveLength(0);
+    expect(status.activeRunId).toBeNull();
+  });
+
+  it(
+    "stamps the tuple after the fixed heading job and unlocks live tasks",
+    { timeout: 45_000 },
+    async () => {
+      await setOpenRouterKey(TEST_KEY, { remember: false, env: process.env });
+
+      const started = await verifyRoute.POST(
+        makeRequest("/api/agent/verify", { confirmCost: true }),
+      );
+      expect(started.status).toBe(200);
+      const startedBody = (await started.json()) as {
+        ok: boolean;
+        run: AgentRunRecord;
+      };
+      expect(startedBody.ok).toBe(true);
+      expect(startedBody.run).toMatchObject({
+        kind: "verification",
+        status: "running",
+        limits: AGENT_VERIFICATION_LIMITS,
+      });
+      expect(startedBody.run.task).toContain(`${origin}/shop`);
+      expect(JSON.stringify(startedBody)).not.toContain(TEST_KEY);
+
+      const duplicate = await verifyRoute.POST(
+        makeRequest("/api/agent/verify", { confirmCost: true }),
+      );
+      expect(duplicate.status).toBe(409);
+      const duplicateBody = (await duplicate.json()) as {
+        error: { code: string };
+        runId: string;
+      };
+      expect(duplicateBody.error.code).toBe("run-active");
+      expect(duplicateBody.runId).toBe(startedBody.run.runId);
+
+      const finished = await waitForRun(startedBody.run.runId);
+      expect(finished).toMatchObject({
+        status: "completed",
+        stopReason: "completed",
+        outputText: '{"heading":"Shop"}',
+        evaluation: { status: "passed" },
+      });
+
+      const stamp = await loadAgentCompatibility(createStorage());
+      expect(stamp).toMatchObject({
+        modelId: DEFAULT_BROWSER_MODEL_ID,
+        sdkVersion: await readInstalledSdkVersion(),
+        origin,
+        vision: "unverified",
+      });
+
+      const verifiedStatus = await getStatus();
+      expect(verifiedStatus.gate).toMatchObject({
+        verified: true,
+        reason: "verified",
+        vision: "unverified",
+      });
+      expect(JSON.stringify(verifiedStatus)).not.toContain(TEST_KEY);
+
+      await waitForPaidLockRelease();
+      const task = await runsRoute.POST(
+        makeRequest("/api/agent/runs", { task: "Read the main heading." }),
+      );
+      expect(task.status).toBe(200);
+      const taskBody = (await task.json()) as { run: AgentRunRecord };
+      await waitForRun(taskBody.run.runId);
+    },
+  );
+
+  it(
+    "leaves the model unverified when the heading answer does not match",
+    { timeout: 45_000 },
+    async () => {
+      process.env.AGENT_WORKER_FAKE_MODE = "wrong-heading";
+      await setOpenRouterKey(TEST_KEY, { remember: false, env: process.env });
+
+      const started = await verifyRoute.POST(
+        makeRequest("/api/agent/verify", { confirmCost: true }),
+      );
+      expect(started.status).toBe(200);
+      const startedBody = (await started.json()) as { run: AgentRunRecord };
+
+      const finished = await waitForRun(startedBody.run.runId);
+      expect(finished).toMatchObject({
+        status: "completed",
+        stopReason: "completed",
+        evaluation: { status: "failed" },
+      });
+      expect(finished.evaluation.reason).toContain("Storefront");
+      expect(await loadAgentCompatibility(createStorage())).toBeUndefined();
+      const status = await getStatus();
+      expect(status.gate).toMatchObject({
+        verified: false,
+        reason: "verification-required",
+      });
     },
   );
 });

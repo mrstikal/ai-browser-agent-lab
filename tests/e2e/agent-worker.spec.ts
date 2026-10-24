@@ -4,13 +4,104 @@ import { join } from "node:path";
 
 /**
  * Runs first (sorted by file name) because the shared dev server loads the
- * session key lazily: seeding `data/secrets/openrouter-key` and a matching
- * compatibility stamp before any key-reading request lets this spec prove the
- * supervisor strategy next to a real Next.js dev server. The spec deletes the
- * key again through the guarded route so later setup tests see a fresh state.
+ * session key lazily: seeding `data/secrets/openrouter-key` before any
+ * key-reading request lets this spec prove the browser-based verification and
+ * the supervisor strategy next to a real Next.js dev server. The second test
+ * deletes the key again through the guarded route so later setup tests see a
+ * fresh state.
  */
 
 const TEST_KEY = "e2e-supervisor-secret-key-59";
+
+test("the Verify Agent Model action stamps the fixed Shop heading run", async ({
+  page,
+  request,
+  baseURL,
+}) => {
+  if (!baseURL) throw new Error("The E2E base URL is missing.");
+  const dataDir = process.env.DATA_DIR;
+  if (!dataDir) throw new Error("The E2E DATA_DIR is missing.");
+  const origin = baseURL;
+
+  const sdkManifest = JSON.parse(
+    await readFile(
+      join(process.cwd(), "node_modules", "@browser_use", "pi", "package.json"),
+      "utf8",
+    ),
+  ) as { version: string };
+  await mkdir(join(dataDir, "secrets"), { recursive: true, mode: 0o700 });
+  await writeFile(join(dataDir, "secrets", "openrouter-key"), `${TEST_KEY}\n`, {
+    mode: 0o600,
+  });
+  await rm(join(dataDir, "agent-compatibility.json"), { force: true });
+
+  const before = await request.get("/api/agent/status");
+  expect(before.status()).toBe(200);
+  const beforeBody = (await before.json()) as {
+    activeRunId: string | null;
+    gate: { keyAvailable: boolean; verified: boolean; reason: string };
+    runs: Array<{ status: string }>;
+  };
+  expect(beforeBody.gate).toMatchObject({
+    keyAvailable: true,
+    verified: false,
+    reason: "verification-required",
+  });
+  expect(beforeBody.activeRunId).toBeNull();
+  // A retried attempt may leave completed runs behind; none may be active.
+  expect(beforeBody.runs.every((run) => run.status !== "running")).toBe(true);
+
+  await page.goto("/agent");
+  await expect(page.getByTestId("verification-cost-warning")).toContainText(
+    "$0.25",
+  );
+  await expect(page.getByTestId("verification-state")).toContainText(
+    "Verification is required",
+  );
+  const button = page.getByTestId("verify-agent-model");
+  await expect(button).toBeDisabled();
+  await page.getByRole("checkbox").check();
+  await expect(button).toBeEnabled();
+  const runStartedAt = Date.now();
+  await button.click();
+
+  await expect(page.getByTestId("verification-result")).toContainText(
+    "The Shop heading check passed",
+    { timeout: 45_000 },
+  );
+  await expect(page.getByTestId("verification-state")).toContainText(
+    "Verified at",
+  );
+  await expect(page.getByTestId("verification-vision")).toContainText(
+    "Unverified",
+  );
+
+  const stamp = JSON.parse(
+    await readFile(join(dataDir, "agent-compatibility.json"), "utf8"),
+  ) as Record<string, unknown>;
+  expect(stamp).toMatchObject({
+    version: 1,
+    modelId: "openrouter/openai/gpt-5.6-luna",
+    sdkVersion: sdkManifest.version,
+    origin,
+    vision: "unverified",
+  });
+  // The stamp must come from this attempt, not a retried attempt's leftover.
+  expect(Date.parse(String(stamp.verifiedAt))).toBeGreaterThanOrEqual(
+    runStartedAt,
+  );
+
+  const after = await request.get("/api/agent/status");
+  const afterBody = (await after.json()) as {
+    gate: { verified: boolean; vision: string };
+    runs: Array<{ kind: string; evaluation: { status: string } }>;
+  };
+  expect(afterBody.gate).toMatchObject({ verified: true, vision: "unverified" });
+  expect(
+    afterBody.runs.find((run) => run.kind === "verification")?.evaluation.status,
+  ).toBe("passed");
+  expect(JSON.stringify(afterBody)).not.toContain(TEST_KEY);
+});
 
 test("a mocked supervised run works beside the dev server", async ({
   request,
@@ -52,12 +143,14 @@ test("a mocked supervised run works beside the dev server", async ({
     const before = await request.get("/api/agent/status");
     expect(before.status()).toBe(200);
     const beforeBody = (await before.json()) as {
+      activeRunId: string | null;
       gate: { keyAvailable: boolean; verified: boolean };
-      runs: unknown[];
+      runs: Array<{ status: string }>;
     };
     expect(beforeBody.gate.keyAvailable).toBe(true);
     expect(beforeBody.gate.verified).toBe(true);
-    expect(beforeBody.runs).toHaveLength(0);
+    expect(beforeBody.activeRunId).toBeNull();
+    expect(beforeBody.runs.every((run) => run.status !== "running")).toBe(true);
 
     const started = await request.post("/api/agent/runs", {
       data: { task: "Read the main heading." },

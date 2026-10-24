@@ -27,6 +27,13 @@ const usage = {
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.01 },
 };
 
+const headingAnswer =
+  mode === "wrong-heading"
+    ? { output: { heading: "Storefront" }, text: '{"heading":"Storefront"}' }
+    : mode === "malformed-output"
+      ? { output: null, text: "The heading is Shop." }
+      : { output: { heading: "Shop" }, text: '{"heading":"Shop"}' };
+
 let lastOptions = null;
 let closeCount = 0;
 let cancelCount = 0;
@@ -207,8 +214,8 @@ const agent = {
     options.onEvent?.({ type: "agent_end", messages: [] });
     return {
       status: "completed",
-      output: { heading: "Shop" },
-      text: '{"heading":"Shop"}',
+      output: headingAnswer.output,
+      text: headingAnswer.text,
       steps: 3,
       durationMs: 25,
       usage,

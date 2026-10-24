@@ -152,6 +152,16 @@ export interface StartAgentRunOptions {
   readonly limits?: AgentRunLimitsInput | undefined;
   /** Heartbeat interval override (tests/tuning); bounded by the protocol. */
   readonly heartbeatMs?: number | undefined;
+  /**
+   * Runs once after a fully settled run (terminal state persisted, process
+   * group proven gone) while the paid lock is still held. Never called for a
+   * hung run or a run whose leftover processes keep the lock. The verification
+   * module uses it to evaluate the answer and stamp the model tuple; the
+   * supervisor itself never writes that stamp.
+   */
+  readonly onSettled?:
+    | ((record: AgentRunRecord) => unknown)
+    | undefined;
   readonly env?: StorageEnv | undefined;
   readonly storage?: Storage | undefined;
   readonly fetchImpl?: typeof fetch | undefined;
@@ -738,6 +748,20 @@ export async function startAgentRun(
     throw error;
   }
 
+  // Shared by the synchronous spawn-failure path and the fully settled path.
+  // It runs while the paid lock is still held, so an in-app key change cannot
+  // race a verification stamp.
+  const runSettledHook = async (): Promise<void> => {
+    if (!options.onSettled) return;
+    try {
+      await options.onSettled({ ...record });
+    } catch (error) {
+      console.error(
+        `[agent-supervisor] The settle hook of agent run ${runId} failed: ${messageOf(error)}`,
+      );
+    }
+  };
+
   let child: ChildProcess;
   try {
     child = spawn(command.command, [...command.args], {
@@ -756,6 +780,7 @@ export async function startAgentRun(
     record.endedAt = endedAt;
     record.updatedAt = endedAt;
     await saveAgentRun(storage, record).catch(() => undefined);
+    await runSettledHook();
     await refuse();
     return {
       status: "failed",
@@ -962,6 +987,10 @@ export async function startAgentRun(
     finished = true;
     clearWatchdogs();
     await writeChain.catch(() => undefined);
+    // The settle hook runs before the paid lock is released: an in-app key
+    // change is refused while the operation is active, so a verification
+    // stamp cannot race a credential replacement.
+    await runSettledHook();
     const current = holder().runs.get(storage.root);
     if (current?.runId === runId) holder().runs.delete(storage.root);
     endPaidOperation(runId);
