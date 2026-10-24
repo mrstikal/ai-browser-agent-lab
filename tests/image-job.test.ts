@@ -11,6 +11,7 @@ import {
   requestImageJobStop,
   resetAdmittedImageJobsForTests,
   startImageJob,
+  updateImageJob,
 } from "../src/server/image-job";
 import {
   createImageJobSnapshot,
@@ -123,6 +124,35 @@ afterEach(async () => {
 });
 
 describe("image job admission", () => {
+  it("keeps updatedAt monotonic when the wall clock steps backwards", async () => {
+    const storage = await makeStorage();
+    const env = await startCatalog();
+    const fingerprint = await fingerprintFor(storage, env);
+    const admitted = await startImageJob({
+      storage,
+      apiKey: "sk-or-v1-job-key",
+      fingerprint,
+      env,
+    });
+    expect(admitted.status).toBe("started");
+    if (admitted.status !== "started") return;
+
+    // Simulate a WSL/NTP clock step: an update stamped before the job existed.
+    const steppedBack = new Date(Date.parse(admitted.job.createdAt) - 60_000);
+    const updated = await updateImageJob(
+      storage,
+      admitted.job.jobId,
+      (current) => ({ ...current, status: "running" }),
+      steppedBack,
+    );
+    expect(updated).not.toBeNull();
+    expect(updated?.updatedAt).toBe(admitted.job.updatedAt);
+    expect(Date.parse(updated?.updatedAt ?? "")).toBeGreaterThanOrEqual(
+      Date.parse(admitted.job.createdAt),
+    );
+    expect((await loadImageJob(storage))?.status).toBe("running");
+  });
+
   it("acquires the paid lock with the job UUID, rechecks the quote, and persists a queued job", async () => {
     const storage = await makeStorage();
     const env = await startCatalog();

@@ -87,6 +87,54 @@ export function parseProcStat(pid: number, content: string): number {
   return ticks;
 }
 
+/**
+ * Reads the process-group ID from `/proc/<pid>/stat`. A worker spawned with
+ * `detached: true` becomes its own group leader, so this value must equal its
+ * PID before a later phase may signal that group.
+ */
+export function parseProcGroupId(pid: number, content: string): number {
+  assertPid(pid);
+  const close = content.lastIndexOf(")");
+  if (close < 0) {
+    throw new ProcessIdentityError(`Malformed /proc/${pid}/stat: missing command field.`);
+  }
+
+  const fields = content.slice(close + 1).trim().split(/\s+/);
+  if (fields[0] === undefined || fields[0].length !== 1) {
+    throw new ProcessIdentityError(`Malformed /proc/${pid}/stat: missing process state.`);
+  }
+  const rawGroup = fields[2];
+  if (rawGroup === undefined || !/^\d+$/.test(rawGroup)) {
+    throw new ProcessIdentityError(
+      `Malformed /proc/${pid}/stat: missing or invalid process group ID.`,
+    );
+  }
+  const groupId = Number(rawGroup);
+  if (!Number.isSafeInteger(groupId) || groupId <= 0 || groupId > 2 ** 31 - 1) {
+    throw new ProcessIdentityError(
+      `Malformed /proc/${pid}/stat: process group ID is out of range.`,
+    );
+  }
+  return groupId;
+}
+
+export async function readProcessGroupId(
+  pid: number,
+  options: ProcOptions = {},
+): Promise<number | undefined> {
+  assertPid(pid);
+  const target = join(procRoot(options), String(pid), "stat");
+  try {
+    return parseProcGroupId(pid, await readFile(target, "utf8"));
+  } catch (error) {
+    if (isNotFound(error)) return undefined;
+    if (error instanceof ProcessIdentityError) throw error;
+    throw new ProcessIdentityError(`Cannot read process identity from ${target}.`, {
+      cause: error,
+    });
+  }
+}
+
 export async function readProcessStartTicks(
   pid: number,
   options: ProcOptions = {},

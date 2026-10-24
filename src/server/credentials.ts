@@ -12,6 +12,14 @@ export interface KeyStatus {
   readonly source: KeySource | null;
 }
 
+export interface KeyStatusOptions {
+  /**
+   * Read-only callers (status pages) set this false so a GET never deletes
+   * crash-leftover temp files; key changes still sweep them.
+   */
+  readonly sweepTemps?: boolean | undefined;
+}
+
 export class CredentialError extends Error {
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
@@ -54,14 +62,17 @@ function holder(): CredentialHolder {
   return created;
 }
 
-async function ensureLoaded(env: StorageEnv): Promise<void> {
+async function ensureLoaded(
+  env: StorageEnv,
+  options: KeyStatusOptions = {},
+): Promise<void> {
   const state = holder();
   if (state.loaded) return;
   if (state.loadPromise) return state.loadPromise;
 
   const load = (async () => {
     const storage = createStorage(env);
-    await sweepKeyTemps(storage);
+    if (options.sweepTemps !== false) await sweepKeyTemps(storage);
     const buffer = await storage.readFile(OPENROUTER_KEY_SEGMENTS);
 
     // A setter or delete may have completed while the read was in flight; it
@@ -112,8 +123,9 @@ export async function loadOpenRouterKey(
 
 export async function getKeyStatus(
   env: StorageEnv = process.env,
+  options: KeyStatusOptions = {},
 ): Promise<KeyStatus> {
-  await ensureLoaded(env);
+  await ensureLoaded(env, options);
   const state = holder();
   if (!state.key) return { keyAvailable: false, source: null };
   return { keyAvailable: true, source: state.source ?? "memory" };

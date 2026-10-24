@@ -4,9 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   getCurrentProcessIdentity,
+  parseProcGroupId,
   parseProcStat,
   ProcessIdentityError,
   readBootId,
+  readProcessGroupId,
   readProcessIdentity,
   readProcessStartTicks,
 } from "../src/server/process-identity";
@@ -21,10 +23,17 @@ async function makeProcRoot(): Promise<string> {
   return root;
 }
 
-function statLine(pid: number, ticks: number, comm = "node"): string {
-  const fields = Array.from({ length: 49 }, (_, index) =>
-    index === 18 ? String(ticks) : "0",
-  );
+function statLine(
+  pid: number,
+  ticks: number,
+  comm = "node",
+  groupId = pid,
+): string {
+  const fields = Array.from({ length: 49 }, (_, index) => {
+    if (index === 1) return String(groupId);
+    if (index === 18) return String(ticks);
+    return "0";
+  });
   return `${pid} (${comm}) S ${fields.join(" ")}\n`;
 }
 
@@ -46,11 +55,23 @@ describe("Linux process identity", () => {
 
     expect(await readBootId({ procRoot: root })).toBe("test-boot-id");
     expect(await readProcessStartTicks(123, { procRoot: root })).toBe(4242);
+    expect(await readProcessGroupId(123, { procRoot: root })).toBe(123);
     expect(await readProcessIdentity(123, { procRoot: root })).toEqual({
       pid: 123,
       procStartTicks: 4242,
       bootId: "test-boot-id",
     });
+  });
+
+  it("reads a detached worker's own process group", async () => {
+    const root = await makeProcRoot();
+    await writeProcStat(root, 321, statLine(321, 77, "node", 321));
+    expect(await readProcessGroupId(321, { procRoot: root })).toBe(321);
+    expect(parseProcGroupId(321, statLine(321, 77, "node", 321))).toBe(321);
+    expect(() => parseProcGroupId(321, "321 (node) S 1 0 3")).toThrow(
+      ProcessIdentityError,
+    );
+    expect(await readProcessGroupId(999, { procRoot: root })).toBeUndefined();
   });
 
   it("distinguishes a missing process from malformed metadata", async () => {

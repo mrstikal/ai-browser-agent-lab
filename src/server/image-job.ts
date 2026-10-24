@@ -14,6 +14,7 @@ import {
   type ImageJobSnapshot,
 } from "./image-state";
 import { acquireLock, LockError, LockHeldError, type OwnerLock } from "./lock";
+import { PAID_JOB_LOCK_KIND, PAID_JOB_LOCK_SEGMENTS } from "./paid-lock";
 import {
   beginPaidOperation,
   endPaidOperation,
@@ -21,8 +22,7 @@ import {
 } from "./paid-operation";
 import { Storage, type StorageEnv } from "./storage";
 
-export const PAID_JOB_LOCK_SEGMENTS = ["locks", "paid-job.lock"] as const;
-export const PAID_JOB_LOCK_KIND = "paid-job";
+export { PAID_JOB_LOCK_KIND, PAID_JOB_LOCK_SEGMENTS };
 
 export type StartImageJobResult =
   | { readonly status: "started"; readonly job: ImageJobSnapshot }
@@ -144,10 +144,16 @@ export async function updateImageJob(
     if (!current || current.jobId !== jobId) return null;
     const next = update(current);
     if (next === null) return current;
+    // The host wall clock can step backwards (WSL/NTP resync). A per-record
+    // monotonic updatedAt keeps a legitimate write from being rejected as
+    // corruption; every other field is still validated by saveImageJob.
+    const updatedAt = new Date(
+      Math.max(now.getTime(), Date.parse(current.updatedAt)),
+    ).toISOString();
     const saved: ImageJobSnapshot = {
       ...next,
       jobId: current.jobId,
-      updatedAt: now.toISOString(),
+      updatedAt,
     };
     await saveImageJob(storage, saved);
     return saved;

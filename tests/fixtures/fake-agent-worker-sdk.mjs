@@ -90,6 +90,9 @@ const agent = {
         workspace: "",
       };
     }
+    if (mode === "slow") {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
     if (mode === "flood") {
       for (let index = 0; index < 1100; index += 1) {
         options.onEvent?.({
