@@ -45,6 +45,20 @@ export const modelSettingsSchema = z.strictObject({
   browser: browserModelSettingsSchema,
 });
 
+export const SUPPORT_PRIORITIES = ["Low", "Normal", "High"] as const;
+
+export const supportSubmissionSchema = z.strictObject({
+  requestId: z.uuid(),
+  fullName: z.string().trim().min(2).max(120),
+  email: z.email().trim().max(200),
+  subject: z.string().trim().min(3).max(160),
+  priority: z.enum(SUPPORT_PRIORITIES),
+  description: z.string().trim().min(10).max(4000),
+  confirmLocalTest: z.literal(true),
+});
+
+export type SupportSubmissionInput = z.infer<typeof supportSubmissionSchema>;
+
 export type ImageModelSelection = z.infer<typeof imageModelSettingsSchema>;
 export type BrowserModelSelection = z.infer<typeof browserModelSettingsSchema>;
 export type ModelSettings = z.infer<typeof modelSettingsSchema>;
