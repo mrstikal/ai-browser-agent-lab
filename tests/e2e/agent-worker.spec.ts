@@ -179,6 +179,82 @@ test("dashboard task controls start a run without claiming task success", async 
     '{"heading":"Shop"}',
   );
   await expect(runButton).toBeEnabled({ timeout: 15_000 });
+
+  await expect(page.getByTestId("agent-trace-connection")).toHaveText("Live", {
+    timeout: 15_000,
+  });
+  await expect(page.getByTestId("agent-trace-count")).toHaveText("5", {
+    timeout: 15_000,
+  });
+  await expect(page.getByTestId("agent-trace-step")).toHaveText("1");
+  await expect(page.getByTestId("agent-trace-errors")).toHaveText("0");
+  await expect(page.getByTestId("agent-trace-latest-action")).toContainText(
+    "Agent finished",
+  );
+  await expect(page.getByTestId("agent-trace-image")).toHaveText(
+    "Not observed",
+  );
+  const traceRows = page.getByTestId("agent-trace-event");
+  await expect(traceRows).toHaveCount(5);
+  const readSeqs = async (): Promise<(string | null)[]> =>
+    traceRows.evaluateAll((nodes) =>
+      nodes.map((node) => node.getAttribute("data-seq")),
+    );
+  expect(await readSeqs()).toEqual(["1", "2", "3", "4", "5"]);
+
+  // A refresh replays the persisted trace through the server-rendered initial
+  // state and the SSE reset; the rows must not duplicate.
+  await page.reload();
+  await expect(page.getByTestId("agent-trace-count")).toHaveText("5", {
+    timeout: 15_000,
+  });
+  await expect(traceRows).toHaveCount(5);
+  expect(await readSeqs()).toEqual(["1", "2", "3", "4", "5"]);
+
+  // A dropped stream must fall back cleanly and reconnect without
+  // duplicating already-seen events.
+  await page.route("**/api/agent/stream", (route) => route.abort());
+  await page.reload();
+  await expect(page.getByTestId("agent-trace-connection")).toContainText(
+    "Reconnecting",
+    { timeout: 15_000 },
+  );
+  await expect(page.getByTestId("agent-trace-count")).toHaveText("5");
+  await page.unroute("**/api/agent/stream");
+  await expect(page.getByTestId("agent-trace-connection")).toHaveText("Live", {
+    timeout: 30_000,
+  });
+  await expect(traceRows).toHaveCount(5);
+  expect(await readSeqs()).toEqual(["1", "2", "3", "4", "5"]);
+
+  const content = await page.content();
+  expect(content).not.toContain(TEST_KEY);
+  expect(content.toLowerCase()).not.toContain("authorization");
+  expect(content.toLowerCase()).not.toContain("cookie");
+});
+
+test("trace renders hostile tool names as plain text", async ({
+  page,
+  baseURL,
+}) => {
+  if (!baseURL) throw new Error("The E2E base URL is missing.");
+  const dataDir = process.env.DATA_DIR;
+  if (!dataDir) throw new Error("The E2E DATA_DIR is missing.");
+  await seedKeyFile(dataDir);
+  await writeCompatibilityStamp(dataDir, baseURL);
+
+  await page.goto("/agent");
+  await page.getByTestId("agent-task-input").fill("Read the heading [[xss]]");
+  await page.getByTestId("agent-run-task").click();
+  await expect(page.getByTestId("agent-run-execution")).toHaveText(
+    "Execution completed",
+    { timeout: 30_000 },
+  );
+
+  const hostile = '<img src=x onerror="alert(1)">';
+  const traceEvents = page.getByTestId("agent-trace-events");
+  await expect(traceEvents).toContainText(hostile, { timeout: 15_000 });
+  await expect(traceEvents.locator("img")).toHaveCount(0);
 });
 
 test("dashboard refuses a duplicate run and renders cancellation", async ({
@@ -201,6 +277,12 @@ test("dashboard refuses a duplicate run and renders cancellation", async ({
   await expect(page.getByTestId("agent-run-execution")).toHaveText("Running", {
     timeout: 15_000,
   });
+  await expect(page.getByTestId("agent-trace-count")).toHaveText("2", {
+    timeout: 15_000,
+  });
+  await expect(page.getByTestId("agent-trace-latest-action")).toContainText(
+    "Tool started: javascript",
+  );
   await expect(runButton).toBeDisabled();
   await expect(page.getByTestId("agent-run-active-note")).toContainText(
     "already active",

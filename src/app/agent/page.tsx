@@ -7,7 +7,14 @@ import {
   AGENT_RUN_MAX_TIMEOUT_MS,
   AGENT_WORKER_MAX_TASK_CHARS,
 } from "@/lib/agent-ipc";
-import { pickAgentDashboardView } from "@/lib/agent-dashboard-view";
+import {
+  pickAgentDashboardView,
+  selectTraceRun,
+  type AgentDashboardView,
+} from "@/lib/agent-dashboard-view";
+import { EMPTY_AGENT_TRACE, type AgentTraceState } from "@/lib/agent-trace";
+import { loadAgentTraceView } from "@/server/agent-trace";
+import { createStorage } from "@/server/storage";
 import {
   AGENT_VERIFICATION_LIMITS,
   loadAgentStatus,
@@ -23,9 +30,23 @@ export const metadata: Metadata = {
 
 export default async function AgentPage() {
   let status: AgentStatusSnapshot | null = null;
+  let view: AgentDashboardView | null = null;
+  let initialTrace: AgentTraceState = EMPTY_AGENT_TRACE;
+  let initialTraceError: string | null = null;
   let error: string | null = null;
   try {
-    status = await loadAgentStatus();
+    const storage = createStorage();
+    status = await loadAgentStatus({ storage });
+    view = pickAgentDashboardView(status);
+    const traceRun = selectTraceRun(view);
+    if (traceRun !== null) {
+      try {
+        initialTrace = await loadAgentTraceView(storage, traceRun.runId);
+      } catch {
+        initialTraceError =
+          "The saved trace is unreadable; the run itself is unaffected.";
+      }
+    }
   } catch {
     error =
       "Saved agent state is unreadable. Inspect data/agent-runs and data/agent-compatibility.json; no work was started.";
@@ -54,9 +75,12 @@ export default async function AgentPage() {
         </p>
       ) : null}
 
-      {status ? (
+      {status && view ? (
         <AgentDashboard
-          initial={pickAgentDashboardView(status)}
+          initial={view}
+          initialTrace={initialTrace}
+          initialTraceError={initialTraceError}
+          initialCorruptRuns={status.corruptRuns}
           verificationLimits={AGENT_VERIFICATION_LIMITS}
           taskDefaults={AGENT_RUN_DEFAULT_LIMITS}
           taskCaps={{

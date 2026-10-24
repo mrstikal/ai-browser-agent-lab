@@ -37,3 +37,19 @@ export function pickAgentDashboardView(
     latestTask: snapshot.runs.find((run) => run.kind === "task") ?? null,
   };
 }
+
+/**
+ * The trace follows the current task run and, after it settles, the latest
+ * task run, so a refresh still shows the persisted chronological events.
+ */
+export function selectTraceRun(
+  view: AgentDashboardView,
+): AgentRunRecord | null {
+  if (view.activeRunId !== null) {
+    // An unreadable active record leaves the run kind unknown; showing an
+    // older task's trace here would misrepresent the active run.
+    if (view.activeRun === null) return null;
+    return view.activeRun.kind === "task" ? view.activeRun : view.latestTask;
+  }
+  return view.latestTask;
+}

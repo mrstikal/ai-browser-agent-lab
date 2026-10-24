@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { guardedJsonFetch } from "@/app/setup/guard-fetch";
 import {
   pickAgentDashboardView,
@@ -9,8 +9,17 @@ import {
   type AgentStatusLike,
 } from "@/lib/agent-dashboard-view";
 import type { AgentRunLimits } from "@/lib/agent-ipc";
+import {
+  AGENT_STREAM_VERSION,
+  AGENT_TRACE_VERSION,
+  mergeAgentTrace,
+  type AgentStreamSnapshot,
+  type AgentTracePayload,
+  type AgentTraceState,
+} from "@/lib/agent-trace";
 import type { AgentRunRecord } from "@/server/agent-runs";
 import { TaskPanel } from "./task-panel";
+import { TracePanel, type AgentStreamConnection } from "./trace-panel";
 import { VerificationPanel } from "./verification-panel";
 
 const TERMINAL_RUN_STATUSES = new Set(["completed", "failed", "interrupted"]);
@@ -34,14 +43,41 @@ function applyReturnedRun(
     run.status === "running" ||
     run.status === "cancelling" ||
     run.status === "hung";
-  return {
+  const latest =
+    run.kind === "task" ? current.latestTask : current.latestVerification;
+  // A terminal SSE snapshot can arrive before the mutation response. Never
+  // resurrect that run from the stale running record in the response, and
+  // never reactivate a run that a newer same-kind run has already superseded.
+  const superseded =
+    latest !== null &&
+    latest.runId !== run.runId &&
+    latest.startedAt > run.startedAt;
+  if (
+    isActive &&
+    (superseded ||
+      (latest?.runId === run.runId &&
+        TERMINAL_RUN_STATUSES.has(latest.status)))
+  ) {
+    const clearsActive = current.activeRunId === run.runId;
+    return {
+      ...current,
+      activeRunId: clearsActive ? null : current.activeRunId,
+      activeRun: clearsActive ? null : current.activeRun,
+    };
+  }
+  const clearsActive = !isActive && current.activeRunId === run.runId;
+  const next: AgentDashboardView = {
     ...current,
-    activeRunId: isActive ? run.runId : current.activeRunId,
-    activeRun: isActive ? run : current.activeRun,
-    latestTask: run.kind === "task" ? run : current.latestTask,
-    latestVerification:
-      run.kind === "verification" ? run : current.latestVerification,
+    activeRunId: isActive
+      ? run.runId
+      : clearsActive
+        ? null
+        : current.activeRunId,
+    activeRun: isActive ? run : clearsActive ? null : current.activeRun,
   };
+  return run.kind === "task"
+    ? { ...next, latestTask: run }
+    : { ...next, latestVerification: run };
 }
 
 async function readMutationFailure(
@@ -57,7 +93,7 @@ async function readMutationFailure(
         ? payload.error.message
         : `The request failed (${response.status}).`;
     const run =
-      payload.run !== undefined && typeof payload.run.runId === "string"
+      payload.run != null && typeof payload.run.runId === "string"
         ? payload.run
         : null;
     return { message, run };
@@ -80,6 +116,9 @@ export interface TaskLimitsCaps {
 
 export interface AgentDashboardProps {
   readonly initial: AgentDashboardView;
+  readonly initialTrace: AgentTraceState;
+  readonly initialTraceError: string | null;
+  readonly initialCorruptRuns: number;
   readonly verificationLimits: AgentRunLimits;
   readonly taskDefaults: AgentRunLimits;
   readonly taskCaps: TaskLimitsCaps;
@@ -88,6 +127,9 @@ export interface AgentDashboardProps {
 
 export function AgentDashboard({
   initial,
+  initialTrace,
+  initialTraceError,
+  initialCorruptRuns,
   verificationLimits,
   taskDefaults,
   taskCaps,
@@ -99,12 +141,30 @@ export function AgentDashboard({
   const [pollRunId, setPollRunId] = useState<string | null>(null);
   const [pollingStopped, setPollingStopped] = useState(false);
   const [pollError, setPollError] = useState<string | null>(null);
+  const [corruptRuns, setCorruptRuns] = useState(initialCorruptRuns);
   const [feedback, setFeedback] = useState<DashboardFeedback | null>(null);
   const [verificationConfirmed, setVerificationConfirmed] = useState(false);
+  const [connection, setConnection] =
+    useState<AgentStreamConnection>("connecting");
+  const [trace, setTrace] = useState<AgentTraceState>(initialTrace);
+  const [traceError, setTraceError] = useState<string | null>(
+    initialTraceError,
+  );
+  const [streamError, setStreamError] = useState<string | null>(null);
   // React state is asynchronous, so a fast double click would otherwise send
   // two guarded mutations; the server refuses the duplicate, but the ref keeps
   // the client from producing a confusing second error.
   const requestInFlight = useRef(false);
+  const pollRunIdRef = useRef<string | null>(null);
+  // The started-at of the polled run, not the response time: a snapshot that
+  // predates the run's own start cannot know it yet and must not clear it.
+  const pollRunStartedAtRef = useRef<string | null>(null);
+  // React state is asynchronous; this ref holds the latest applied view so a
+  // mutation response can decide synchronously whether its run is still active.
+  const viewRef = useRef(initial);
+  // The SSE handlers run outside React's render cycle. This ref lets an
+  // in-flight status poll stop before it overwrites a newer live snapshot.
+  const connectionRef = useRef<AgentStreamConnection>("connecting");
 
   const runActive = pollRunId !== null || view.activeRunId !== null;
   // A stopped poller must stay stopped even while the run is still active;
@@ -112,10 +172,147 @@ export function AgentDashboard({
   const polling = runActive && !pollingStopped;
   const activeRunTimeoutMs = view.activeRun?.limits.timeoutMs ?? null;
 
+  const applyView = useCallback((next: AgentDashboardView): void => {
+    viewRef.current = next;
+    setView(next);
+  }, []);
+
+  const clearPollState = useCallback((): void => {
+    pollRunIdRef.current = null;
+    pollRunStartedAtRef.current = null;
+    setPollRunId(null);
+    setPollingStopped(false);
+    setBusy(null);
+    setFeedback(null);
+    setPollError(null);
+    router.refresh();
+  }, [router]);
+
+  const finishSettledPoll = useCallback(
+    (nextView: AgentDashboardView, generatedAt: string): void => {
+      const runId = pollRunIdRef.current;
+      if (runId === null) return;
+      if (nextView.activeRunId !== null) {
+        // Only one run can be active. If a different run superseded ours, the
+        // polled run is no longer the one this panel should wait for.
+        if (nextView.activeRunId !== runId) clearPollState();
+        return;
+      }
+      const candidate =
+        nextView.latestTask?.runId === runId
+          ? nextView.latestTask
+          : nextView.latestVerification?.runId === runId
+            ? nextView.latestVerification
+            : null;
+      if (candidate !== null) {
+        if (TERMINAL_RUN_STATUSES.has(candidate.status)) clearPollState();
+        return;
+      }
+      // No active run and our run is not the latest of its kind: it cannot
+      // still be running under the one-active-run invariant. Ignore a snapshot
+      // generated before the run started, which cannot know the run yet.
+      const runStartedAt = pollRunStartedAtRef.current;
+      const runStartedAtMs =
+        runStartedAt === null ? Number.NaN : Date.parse(runStartedAt);
+      const generatedAtMs = Date.parse(generatedAt);
+      if (
+        !Number.isFinite(runStartedAtMs) ||
+        !Number.isFinite(generatedAtMs) ||
+        generatedAtMs >= runStartedAtMs
+      ) {
+        clearPollState();
+      }
+    },
+    [clearPollState],
+  );
+
+  // Live updates come from the same-origin SSE stream; the polling effect is
+  // only a fallback while the stream is connecting or reconnecting.
   useEffect(() => {
-    if (!polling) return;
+    let disposed = false;
+    const source = new EventSource("/api/agent/stream");
+
+    source.addEventListener("open", () => {
+      if (disposed) return;
+      connectionRef.current = "live";
+      setConnection("live");
+      setStreamError(null);
+      setPollError(null);
+      setPollingStopped(false);
+    });
+    source.addEventListener("snapshot", (event) => {
+      if (disposed) return;
+      connectionRef.current = "live";
+      setConnection("live");
+      setStreamError(null);
+      setPollError(null);
+      setPollingStopped(false);
+      try {
+        const payload = JSON.parse(
+          (event as MessageEvent<string>).data,
+        ) as AgentStreamSnapshot;
+        if (payload.version !== AGENT_STREAM_VERSION) return;
+        applyView(payload.view);
+        setCorruptRuns(payload.corruptRuns);
+        finishSettledPoll(payload.view, payload.generatedAt);
+      } catch {
+        // Ignore malformed snapshots; the next tick or the fallback recovers.
+      }
+    });
+    source.addEventListener("trace", (event) => {
+      if (disposed) return;
+      try {
+        const payload = JSON.parse(
+          (event as MessageEvent<string>).data,
+        ) as AgentTracePayload;
+        if (payload.version !== AGENT_TRACE_VERSION) return;
+        setTraceError(null);
+        setTrace((current) => mergeAgentTrace(current, payload));
+      } catch {
+        // Ignore malformed trace batches; the next batch recovers.
+      }
+    });
+    source.addEventListener("stream-error", (event) => {
+      if (disposed) return;
+      let code: unknown;
+      try {
+        code = (
+          JSON.parse((event as MessageEvent<string>).data) as {
+            code?: unknown;
+          }
+        ).code;
+      } catch {
+        code = undefined;
+      }
+      if (code === "trace-unreadable") {
+        setTraceError(
+          "The saved trace is unreadable; the run itself is unaffected.",
+        );
+        return;
+      }
+      setStreamError(
+        code === "state-unreadable"
+          ? "Saved agent state is unreadable. The stream keeps retrying."
+          : "Live agent updates are temporarily unavailable.",
+      );
+    });
+    source.addEventListener("error", () => {
+      if (disposed) return;
+      connectionRef.current = "fallback";
+      setConnection("fallback");
+    });
+
+    return () => {
+      disposed = true;
+      source.close();
+    };
+  }, [applyView, finishSettledPoll]);
+
+  useEffect(() => {
+    if (!polling || connection === "live") return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
+    const controller = new AbortController();
     const deadline =
       Date.now() +
       (activeRunTimeoutMs === null
@@ -124,20 +321,27 @@ export function AgentDashboard({
     let failures = 0;
 
     const readStatus = async (): Promise<AgentStatusLike | null> => {
-      const response = await fetch("/api/agent/status", { cache: "no-store" });
+      const response = await fetch("/api/agent/status", {
+        cache: "no-store",
+        signal: controller.signal,
+      });
       if (!response.ok) return null;
       return (await response.json()) as AgentStatusLike;
     };
+
+    // Read through a function so TypeScript does not carry an earlier
+    // non-live narrowing across the awaited request.
+    const streamIsLive = (): boolean => connectionRef.current === "live";
 
     const tick = async () => {
       if (cancelled) return;
       try {
         const snapshot = await readStatus();
-        if (cancelled) return;
+        if (cancelled || streamIsLive()) return;
         if (snapshot === null) throw new Error("status unavailable");
         failures = 0;
         setPollError(null);
-        setView(pickAgentDashboardView(snapshot));
+        applyView(pickAgentDashboardView(snapshot));
         const run =
           pollRunId === null
             ? undefined
@@ -150,36 +354,36 @@ export function AgentDashboard({
           // The verification stamp is written before the supervisor releases
           // its active entry, so one more read makes the final state visible.
           const finalSnapshot = await readStatus();
-          if (!cancelled && finalSnapshot !== null) {
-            setView(pickAgentDashboardView(finalSnapshot));
+          if (cancelled || streamIsLive()) return;
+          if (finalSnapshot !== null) {
+            applyView(pickAgentDashboardView(finalSnapshot));
           }
-          if (!cancelled) {
-            setPollRunId(null);
-            setPollingStopped(false);
-            setBusy(null);
-            setFeedback(null);
-            setPollError(null);
-            router.refresh();
-          }
+          clearPollState();
           return;
         }
       } catch {
+        if (cancelled || streamIsLive()) return;
         failures += 1;
         if (failures >= MAX_CONSECUTIVE_POLL_FAILURES) {
           setPollError(
             "Status updates are unavailable. The run may still be active; refresh the page to check.",
           );
           setPollingStopped(true);
+          pollRunIdRef.current = null;
+          pollRunStartedAtRef.current = null;
           setPollRunId(null);
           setBusy(null);
           return;
         }
       }
+      if (cancelled || streamIsLive()) return;
       if (Date.now() >= deadline) {
         setPollError(
           "The run is still active after the polling window. Refresh the page to inspect its result.",
         );
         setPollingStopped(true);
+        pollRunIdRef.current = null;
+        pollRunStartedAtRef.current = null;
         setPollRunId(null);
         setBusy(null);
         return;
@@ -190,9 +394,17 @@ export function AgentDashboard({
     void tick();
     return () => {
       cancelled = true;
+      controller.abort();
       if (timer !== null) clearTimeout(timer);
     };
-  }, [polling, pollRunId, activeRunTimeoutMs, router]);
+  }, [
+    polling,
+    connection,
+    pollRunId,
+    activeRunTimeoutMs,
+    applyView,
+    clearPollState,
+  ]);
 
   async function startVerification(): Promise<void> {
     if (requestInFlight.current || busy !== null || runActive) return;
@@ -215,7 +427,7 @@ export function AgentDashboard({
         });
         const failedRun = failure.run;
         if (failedRun !== null) {
-          setView((current) => applyReturnedRun(current, failedRun));
+          applyView(applyReturnedRun(viewRef.current, failedRun));
         }
         return;
       }
@@ -230,14 +442,20 @@ export function AgentDashboard({
         });
         return;
       }
-      setView((current) => applyReturnedRun(current, run));
+      applyView(applyReturnedRun(viewRef.current, run));
       setVerificationConfirmed(false);
       setFeedback({
         scope: "verification",
         tone: "status",
         text: "Verification run started. The model must read the Shop heading through the local browser.",
       });
-      setPollRunId(runId);
+      if (viewRef.current.activeRunId === runId) {
+        pollRunIdRef.current = runId;
+        pollRunStartedAtRef.current = run.startedAt;
+        setPollRunId(runId);
+      } else {
+        setFeedback(null);
+      }
     } catch {
       setFeedback({
         scope: "verification",
@@ -271,7 +489,7 @@ export function AgentDashboard({
         });
         const failedRun = failure.run;
         if (failedRun !== null) {
-          setView((current) => applyReturnedRun(current, failedRun));
+          applyView(applyReturnedRun(viewRef.current, failedRun));
         }
         return false;
       }
@@ -286,13 +504,19 @@ export function AgentDashboard({
         });
         return false;
       }
-      setView((current) => applyReturnedRun(current, run));
+      applyView(applyReturnedRun(viewRef.current, run));
       setFeedback({
         scope: "task",
         tone: "status",
         text: "Task run started. The supervisor is launching the local browser.",
       });
-      setPollRunId(runId);
+      if (viewRef.current.activeRunId === runId) {
+        pollRunIdRef.current = runId;
+        pollRunStartedAtRef.current = run.startedAt;
+        setPollRunId(runId);
+      } else {
+        setFeedback(null);
+      }
       return true;
     } catch {
       setFeedback({
@@ -345,13 +569,25 @@ export function AgentDashboard({
 
   return (
     <div className="space-y-8">
-      {pollError ? (
+      {pollError || streamError ? (
         <p
           role="alert"
           data-testid="agent-poll-error"
           className="rounded-lg border border-red-300 bg-red-50 p-4 text-sm text-red-800"
         >
-          {pollError}
+          {pollError ?? streamError}
+        </p>
+      ) : null}
+      {corruptRuns > 0 ? (
+        <p
+          role="alert"
+          data-testid="agent-corrupt-runs"
+          className="rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900"
+        >
+          {corruptRuns} saved agent run{" "}
+          {corruptRuns === 1 ? "record is" : "records are"} unreadable and{" "}
+          {corruptRuns === 1 ? "is" : "are"} hidden. Inspect{" "}
+          <code>data/agent-runs</code>.
         </p>
       ) : null}
       <VerificationPanel
@@ -376,6 +612,12 @@ export function AgentDashboard({
         feedback={feedback}
         onRun={startTask}
         onCancel={(runId) => void cancelRun(runId)}
+      />
+      <TracePanel
+        trace={trace}
+        connection={connection}
+        pollingStopped={pollingStopped}
+        error={traceError}
       />
     </div>
   );

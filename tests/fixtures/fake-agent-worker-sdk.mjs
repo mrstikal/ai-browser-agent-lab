@@ -193,6 +193,13 @@ const agent = {
     // the dashboard can render the active/cancelling/cancelled states
     // deterministically instead of racing a fast mocked run.
     if (typeof task === "string" && task.includes("[[cancel]]")) {
+      options.onEvent?.({ type: "agent_start" });
+      options.onEvent?.({
+        type: "tool_execution_start",
+        toolCallId: "call-1",
+        toolName: "javascript",
+        args: {},
+      });
       return await new Promise((resolve) => {
         const finish = () =>
           setTimeout(
@@ -213,16 +220,20 @@ const agent = {
     }
 
     options.onEvent?.({ type: "agent_start" });
+    const toolName =
+      typeof task === "string" && task.includes("[[xss]]")
+        ? '<img src=x onerror="alert(1)">'
+        : "javascript";
     options.onEvent?.({
       type: "tool_execution_start",
       toolCallId: "call-1",
-      toolName: "javascript",
+      toolName,
       args: {},
     });
     options.onEvent?.({
       type: "tool_execution_end",
       toolCallId: "call-1",
-      toolName: "javascript",
+      toolName,
       isError: false,
       result: {
         content: [
