@@ -1,12 +1,19 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import {
+  AGENT_RUN_DEFAULT_LIMITS,
+  AGENT_RUN_MAX_COST_USD,
+  AGENT_RUN_MAX_STEPS,
+  AGENT_RUN_MAX_TIMEOUT_MS,
+  AGENT_WORKER_MAX_TASK_CHARS,
+} from "@/lib/agent-ipc";
+import { pickAgentDashboardView } from "@/lib/agent-dashboard-view";
+import {
   AGENT_VERIFICATION_LIMITS,
   loadAgentStatus,
   type AgentStatusSnapshot,
 } from "@/server/agent-manager";
-import { pickAgentVerificationView } from "@/lib/agent-verification-view";
-import { VerifyAgentModelForm } from "./verify-agent-model-form";
+import { AgentDashboard } from "./agent-dashboard";
 
 export const dynamic = "force-dynamic";
 
@@ -32,9 +39,9 @@ export default async function AgentPage() {
         </p>
         <h1 className="text-3xl font-semibold tracking-tight">Agent dashboard</h1>
         <p className="max-w-2xl text-slate-600">
-          One dedicated local Chromium session runs one task at a time. Verify the current
-          browser model before any live task, then inspect the run trace and its independent
-          evaluation.
+          One dedicated local Chromium session runs one task at a time. Verify
+          the current browser model, then start a bounded task and inspect its
+          execution status, output, and independent evaluation separately.
         </p>
       </header>
 
@@ -48,9 +55,16 @@ export default async function AgentPage() {
       ) : null}
 
       {status ? (
-        <VerifyAgentModelForm
-          initial={pickAgentVerificationView(status)}
-          limits={AGENT_VERIFICATION_LIMITS}
+        <AgentDashboard
+          initial={pickAgentDashboardView(status)}
+          verificationLimits={AGENT_VERIFICATION_LIMITS}
+          taskDefaults={AGENT_RUN_DEFAULT_LIMITS}
+          taskCaps={{
+            maxSteps: AGENT_RUN_MAX_STEPS,
+            maxTimeoutMs: AGENT_RUN_MAX_TIMEOUT_MS,
+            maxCostUsd: AGENT_RUN_MAX_COST_USD,
+          }}
+          maxTaskChars={AGENT_WORKER_MAX_TASK_CHARS}
         />
       ) : null}
 

@@ -13,6 +13,40 @@ import { join } from "node:path";
 
 const TEST_KEY = "e2e-supervisor-secret-key-59";
 
+async function seedKeyFile(dataDir: string): Promise<void> {
+  await mkdir(join(dataDir, "secrets"), { recursive: true, mode: 0o700 });
+  await writeFile(join(dataDir, "secrets", "openrouter-key"), `${TEST_KEY}\n`, {
+    mode: 0o600,
+  });
+}
+
+async function writeCompatibilityStamp(
+  dataDir: string,
+  origin: string,
+): Promise<void> {
+  const sdkManifest = JSON.parse(
+    await readFile(
+      join(process.cwd(), "node_modules", "@browser_use", "pi", "package.json"),
+      "utf8",
+    ),
+  ) as { version: string };
+  await writeFile(
+    join(dataDir, "agent-compatibility.json"),
+    `${JSON.stringify(
+      {
+        version: 1,
+        modelId: "openrouter/openai/gpt-5.6-luna",
+        sdkVersion: sdkManifest.version,
+        origin,
+        verifiedAt: new Date().toISOString(),
+        vision: "unverified",
+      },
+      null,
+      2,
+    )}\n`,
+  );
+}
+
 test("the Verify Agent Model action stamps the fixed Shop heading run", async ({
   page,
   request,
@@ -101,6 +135,101 @@ test("the Verify Agent Model action stamps the fixed Shop heading run", async ({
     afterBody.runs.find((run) => run.kind === "verification")?.evaluation.status,
   ).toBe("passed");
   expect(JSON.stringify(afterBody)).not.toContain(TEST_KEY);
+});
+
+test("dashboard task controls start a run without claiming task success", async ({
+  page,
+  baseURL,
+}) => {
+  if (!baseURL) throw new Error("The E2E base URL is missing.");
+  const dataDir = process.env.DATA_DIR;
+  if (!dataDir) throw new Error("The E2E DATA_DIR is missing.");
+  await seedKeyFile(dataDir);
+  await writeCompatibilityStamp(dataDir, baseURL);
+
+  await page.goto("/agent");
+  await expect(page.getByTestId("agent-model-notice")).toContainText(
+    "openrouter/openai/gpt-5.6-luna",
+  );
+  await expect(page.getByTestId("agent-limits-notice")).toContainText(
+    "30 steps",
+  );
+  await expect(page.getByTestId("agent-limits-notice")).toContainText("$1.00");
+
+  const runButton = page.getByTestId("agent-run-task");
+  await expect(runButton).toBeDisabled();
+  await page.getByTestId("agent-task-input").fill("Read the main heading.");
+  await expect(runButton).toBeEnabled();
+  await runButton.click();
+
+  await expect(page.getByTestId("agent-run-execution")).toHaveText(
+    "Execution completed",
+    { timeout: 30_000 },
+  );
+  await expect(page.getByTestId("agent-run-stop-reason")).toHaveText(
+    "The SDK completed the run.",
+  );
+  await expect(page.getByTestId("agent-run-task-result")).toContainText(
+    "Not evaluated",
+  );
+  await expect(page.getByTestId("agent-run-task-result")).not.toContainText(
+    "Task passed",
+  );
+  await expect(page.getByTestId("agent-run-output")).toContainText(
+    '{"heading":"Shop"}',
+  );
+  await expect(runButton).toBeEnabled({ timeout: 15_000 });
+});
+
+test("dashboard refuses a duplicate run and renders cancellation", async ({
+  page,
+  request,
+  baseURL,
+}) => {
+  if (!baseURL) throw new Error("The E2E base URL is missing.");
+  const dataDir = process.env.DATA_DIR;
+  if (!dataDir) throw new Error("The E2E DATA_DIR is missing.");
+  await seedKeyFile(dataDir);
+  await writeCompatibilityStamp(dataDir, baseURL);
+
+  await page.goto("/agent");
+  const input = page.getByTestId("agent-task-input");
+  const runButton = page.getByTestId("agent-run-task");
+  await input.fill("Hold the run [[cancel]]");
+  await runButton.click();
+
+  await expect(page.getByTestId("agent-run-execution")).toHaveText("Running", {
+    timeout: 15_000,
+  });
+  await expect(runButton).toBeDisabled();
+  await expect(page.getByTestId("agent-run-active-note")).toContainText(
+    "already active",
+  );
+
+  const duplicate = await request.post("/api/agent/runs", {
+    data: { task: "Second task" },
+    headers: { origin: baseURL },
+  });
+  expect(duplicate.status()).toBe(409);
+  expect(
+    ((await duplicate.json()) as { error: { code: string } }).error.code,
+  ).toBe("run-active");
+
+  await page.getByTestId("agent-cancel-run").click();
+  await expect(page.getByTestId("agent-run-execution")).toHaveText(
+    "Execution stopped (cancelled)",
+    { timeout: 30_000 },
+  );
+  await expect(page.getByTestId("agent-run-task-result")).toContainText(
+    "Not evaluated",
+  );
+  await expect(runButton).toBeEnabled({ timeout: 15_000 });
+
+  const marker = JSON.parse(
+    await readFile(join(dataDir, "agent-test-markers", "cancel.json"), "utf8"),
+  ) as { cancelCount: number };
+  expect(marker.cancelCount).toBeGreaterThan(0);
+  expect(await page.content()).not.toContain(TEST_KEY);
 });
 
 test("a mocked supervised run works beside the dev server", async ({

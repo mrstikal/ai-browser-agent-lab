@@ -189,6 +189,29 @@ const agent = {
       };
     }
 
+    // E2E-only: a task carrying this marker waits for the supervisor cancel so
+    // the dashboard can render the active/cancelling/cancelled states
+    // deterministically instead of racing a fast mocked run.
+    if (typeof task === "string" && task.includes("[[cancel]]")) {
+      return await new Promise((resolve) => {
+        const finish = () =>
+          setTimeout(
+            () =>
+              resolve({
+                status: "cancelled",
+                text: "cancelled by the user",
+                steps: 1,
+                durationMs: 25,
+                usage,
+                workspace: "",
+              }),
+            150,
+          );
+        if (options.signal?.aborted) finish();
+        else options.signal?.addEventListener("abort", finish, { once: true });
+      });
+    }
+
     options.onEvent?.({ type: "agent_start" });
     options.onEvent?.({
       type: "tool_execution_start",
