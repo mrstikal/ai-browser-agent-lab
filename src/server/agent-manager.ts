@@ -21,10 +21,13 @@ import {
   loadAgentCompatibility,
 } from "./agent-compatibility";
 import {
+  AGENT_RUN_VERSION,
   AgentRunError,
   appendAgentEvent,
+  isTerminalAgentRunStatus,
   listAgentRuns,
   saveAgentRun,
+  type AgentRunCancelReason,
   type AgentRunRecord,
   type AgentRunWorker,
 } from "./agent-runs";
@@ -50,6 +53,14 @@ export const AGENT_WORKER_ENTRY_SEGMENTS = ["src", "worker", "agent-runner.ts"] 
 export const AGENT_HEALTH_TIMEOUT_MS = 3_000;
 export const AGENT_SPAWN_TIMEOUT_MS = 10_000;
 export const AGENT_WORKER_STDERR_LIMIT = 8_192;
+
+/**
+ * The SDK enforces `limits.timeoutMs` itself. The supervisor watchdog is a
+ * backstop that fires shortly after, asks the worker to cancel cooperatively,
+ * and then leaves a still-hung worker to Phase 26 forced cleanup.
+ */
+export const AGENT_WATCHDOG_MARGIN_MS = 5_000;
+export const AGENT_CANCEL_GRACE_MS = 10_000;
 
 /** Fixed, bounded verification job limits; independent of the run-task UI. */
 export const AGENT_VERIFICATION_LIMITS: AgentRunLimits = Object.freeze({
@@ -136,10 +147,18 @@ export type AgentStartResult =
       readonly message: string;
     };
 
+/**
+ * A cooperative cancel either records the request (and keeps trying through
+ * the worker's channel) or discovers that the run is already past the grace
+ * period and can only be stopped by Phase 26 forced cleanup.
+ */
+type CancelRequestOutcome = "cancelling" | "hung" | "finished";
+
 interface ActiveAgentRun {
   readonly runId: string;
   readonly child: ChildProcess;
   readonly lock: OwnerLock;
+  readonly requestCancel: (reason: AgentRunCancelReason) => CancelRequestOutcome;
 }
 
 const AGENT_SUPERVISOR_HOLDER_KEY = Symbol.for(
@@ -169,6 +188,39 @@ export function getActiveAgentRunId(storageRoot: string): string | null {
 // Test-only: drops supervisor bookkeeping; children are owned by their tests.
 export function resetAgentSupervisorForTests(): void {
   holder().runs.clear();
+}
+
+export interface CancelAgentRunOptions {
+  readonly runId?: string | undefined;
+  readonly env?: StorageEnv | undefined;
+  readonly storage?: Storage | undefined;
+}
+
+export type CancelAgentRunResult =
+  | { readonly status: "cancelling"; readonly runId: string }
+  | { readonly status: "run-hung"; readonly runId: string }
+  | { readonly status: "run-mismatch"; readonly activeRunId: string }
+  | { readonly status: "no-active-run" };
+
+/**
+ * Cooperative cancellation: asks the worker to abort the SDK run and close its
+ * browser. The run keeps its lock until the worker process is proven gone, so
+ * a Stop click can never unlock a still-live paid operation.
+ */
+export function cancelAgentRun(
+  options: CancelAgentRunOptions = {},
+): CancelAgentRunResult {
+  const env = options.env ?? process.env;
+  const storage = options.storage ?? createStorage(env);
+  const active = holder().runs.get(storage.root);
+  if (!active) return { status: "no-active-run" };
+  if (options.runId !== undefined && options.runId !== active.runId) {
+    return { status: "run-mismatch", activeRunId: active.runId };
+  }
+  const outcome = active.requestCancel("user");
+  if (outcome === "hung") return { status: "run-hung", runId: active.runId };
+  if (outcome === "finished") return { status: "no-active-run" };
+  return { status: "cancelling", runId: active.runId };
 }
 
 export function messageOf(error: unknown): string {
@@ -411,7 +463,7 @@ async function readWorkerIdentity(pid: number): Promise<AgentRunWorker | null> {
   } catch {
     return null;
   }
-  for (let attempt = 0; attempt < 10; attempt += 1) {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
     const [procStartTicks, groupId] = await Promise.all([
       readProcessStartTicks(pid),
       readProcessGroupId(pid),
@@ -419,7 +471,9 @@ async function readWorkerIdentity(pid: number): Promise<AgentRunWorker | null> {
     if (procStartTicks !== undefined && groupId !== undefined) {
       return { pid, groupId, procStartTicks, bootId };
     }
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+    // Yield event-loop turns instead of wall time so the retry stays neutral
+    // under fake-timer tests; the spawn event already implies /proc exists.
+    await new Promise((resolvePromise) => setImmediate(resolvePromise));
   }
   return null;
 }
@@ -584,7 +638,7 @@ export async function startAgentRun(
 
   const startedAt = now().toISOString();
   const record: AgentRunRecord = {
-    version: 1,
+    version: AGENT_RUN_VERSION,
     runId,
     kind: options.kind,
     task,
@@ -608,6 +662,9 @@ export async function startAgentRun(
     worker: null,
     eventCount: 0,
     lastSeq: 0,
+    cancelRequestedAt: null,
+    cancelReason: null,
+    watchdogExpiredAt: null,
   };
 
   try {
@@ -647,6 +704,15 @@ export async function startAgentRun(
   let finished = false;
   let stderrTail = "";
   let eventsUnreadable = false;
+  let watchdogTimer: NodeJS.Timeout | undefined;
+  let graceTimer: NodeJS.Timeout | undefined;
+
+  const clearWatchdogs = (): void => {
+    if (watchdogTimer !== undefined) clearTimeout(watchdogTimer);
+    if (graceTimer !== undefined) clearTimeout(graceTimer);
+    watchdogTimer = undefined;
+    graceTimer = undefined;
+  };
 
   const enqueue = (write: () => Promise<void>): Promise<void> => {
     const next = writeChain.then(write, write);
@@ -671,9 +737,81 @@ export async function startAgentRun(
     });
   };
 
+  const armGraceTimer = (): void => {
+    if (graceTimer !== undefined) return;
+    graceTimer = setTimeout(() => {
+      graceTimer = undefined;
+      if (finished || isTerminalAgentRunStatus(record.status)) return;
+      const expiredAt = now().toISOString();
+      record.status = "hung";
+      record.watchdogExpiredAt = expiredAt;
+      record.updatedAt = expiredAt;
+      record.error = boundedErrorText(
+        record.cancelReason === "user"
+          ? "The worker did not answer the cancel within the grace period; the run is marked for forced cleanup."
+          : "The worker did not answer the wall-clock cancel within the grace period; the run is marked for forced cleanup.",
+        key,
+      );
+      persistRecord();
+      console.error(
+        `[agent-supervisor] Agent run ${runId} is hung after the cancel grace period; forced cleanup (Phase 26) is required and the paid lock stays held.`,
+      );
+    }, AGENT_CANCEL_GRACE_MS);
+    graceTimer.unref?.();
+  };
+
+  const armWatchdog = (): void => {
+    if (watchdogTimer !== undefined) clearTimeout(watchdogTimer);
+    watchdogTimer = setTimeout(() => {
+      watchdogTimer = undefined;
+      if (finished || isTerminalAgentRunStatus(record.status)) return;
+      requestCancel("watchdog");
+    }, limits.timeoutMs + AGENT_WATCHDOG_MARGIN_MS);
+    watchdogTimer.unref?.();
+  };
+
+  const sendCancelMessage = (reason: AgentRunCancelReason): void => {
+    try {
+      child.send({
+        type: "cancel",
+        reason: reason === "watchdog" ? "wall-clock timeout" : "user request",
+      });
+    } catch (error) {
+      // The worker may already be gone; the exit handler settles the run.
+      console.error(
+        `[agent-supervisor] Agent run ${runId} could not send its cancel message: ${messageOf(error)}`,
+      );
+    }
+  };
+
+  const requestCancel = (reason: AgentRunCancelReason): CancelRequestOutcome => {
+    // The record turns terminal slightly before the child exits; a cancel for
+    // a finished run must not arm timers or claim a state change.
+    if (isTerminalAgentRunStatus(record.status)) return "finished";
+    if (record.status === "hung") {
+      // Past the grace period: the cooperative path is exhausted, but a
+      // recovered worker may still honor a late cancel before Phase 26 acts.
+      sendCancelMessage(reason);
+      return "hung";
+    }
+    if (record.status === "running") {
+      const requestedAt = now().toISOString();
+      record.status = "cancelling";
+      record.cancelRequestedAt = requestedAt;
+      record.cancelReason = record.cancelReason ?? reason;
+      record.updatedAt = requestedAt;
+      persistRecord();
+    }
+    sendCancelMessage(reason);
+    // Any cancel escalates to `hung` if the worker does not settle in time.
+    armGraceTimer();
+    return "cancelling";
+  };
+
   const finish = async (): Promise<void> => {
     if (finished) return;
     finished = true;
+    clearWatchdogs();
     await writeChain.catch(() => undefined);
     const current = holder().runs.get(storage.root);
     if (current?.runId === runId) holder().runs.delete(storage.root);
@@ -682,7 +820,8 @@ export async function startAgentRun(
   };
 
   const markFailed = (reason: string): void => {
-    if (record.status !== "running") return;
+    if (isTerminalAgentRunStatus(record.status)) return;
+    clearWatchdogs();
     record.status = "failed";
     record.error = boundedErrorText(
       eventsUnreadable
@@ -697,7 +836,8 @@ export async function startAgentRun(
   };
 
   const markCompleted = (message: AgentWorkerResultMessage): void => {
-    if (record.status !== "running") return;
+    if (isTerminalAgentRunStatus(record.status)) return;
+    clearWatchdogs();
     record.status = "completed";
     record.stopReason = message.status;
     record.steps = message.steps;
@@ -728,7 +868,7 @@ export async function startAgentRun(
   let acceptedSeq = 0;
   let acceptedEvents = 0;
   const persistEvent = (message: AgentWorkerEventMessage): void => {
-    if (record.status !== "running") return;
+    if (isTerminalAgentRunStatus(record.status)) return;
     if (eventsUnreadable) return;
     if (acceptedEvents >= AGENT_WORKER_MAX_EVENTS) return;
     if (message.seq <= acceptedSeq) return;
@@ -749,7 +889,7 @@ export async function startAgentRun(
   };
 
   const protocolViolation = (detail: string): void => {
-    if (record.status !== "running") return;
+    if (isTerminalAgentRunStatus(record.status)) return;
     try {
       child.send({ type: "cancel", reason: "protocol violation" });
     } catch {
@@ -767,7 +907,13 @@ export async function startAgentRun(
     const message = parsed.data;
     if (message.type === "ready") return;
     if (message.type === "started") {
-      if (message.runId !== runId) protocolViolation("run id mismatch");
+      if (message.runId !== runId) {
+        protocolViolation("run id mismatch");
+        return;
+      }
+      // The SDK budget starts when the worker launches the run, so re-anchor
+      // the watchdog; the pre-start timer stays the boot fallback.
+      if (!finished && !isTerminalAgentRunStatus(record.status)) armWatchdog();
       return;
     }
     if (message.type === "error") {
@@ -817,7 +963,8 @@ export async function startAgentRun(
   });
 
   child.once("exit", (code, signal) => {
-    if (record.status === "running") {
+    clearWatchdogs();
+    if (!isTerminalAgentRunStatus(record.status)) {
       const detailLimit = Math.max(200, AGENT_WORKER_MAX_ERROR_CHARS - 200);
       const detail = stderrTail
         ? ` ${redactText(stderrTail, key).slice(-detailLimit)}`
@@ -889,8 +1036,14 @@ export async function startAgentRun(
   }
 
   if (!finished) {
-    holder().runs.set(storage.root, { runId, child, lock });
+    holder().runs.set(storage.root, { runId, child, lock, requestCancel });
   }
+
+  // Bounded wall-clock watchdog: the boot fallback fires at the SDK timeout
+  // plus a margin and is re-anchored when the worker reports `started`; a
+  // worker that still does not settle within the grace period is marked `hung`
+  // for Phase 26 forced cleanup and keeps the paid lock.
+  armWatchdog();
 
   // The worker starts billing only after this validated start message; the
   // key itself travels through the child environment, never through IPC.

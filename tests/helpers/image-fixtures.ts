@@ -106,3 +106,21 @@ export const svgBytes = Buffer.from(
   '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"></svg>',
   "utf8",
 );
+
+/**
+ * Timestamp for jobs/attempts assembled by tests. The WSL host clock steps
+ * backwards by ~1 s every ~15-30 s, which would make a hand-written
+ * `new Date()` violate the persisted monotonicity checks; this returns the
+ * newest of the given stored stamps and the wall clock.
+ */
+export function monotonicStamp(
+  ...stored: Array<string | null | undefined>
+): string {
+  let stamp = Date.now();
+  for (const value of stored) {
+    if (value === null || value === undefined) continue;
+    const parsed = Date.parse(value);
+    if (Number.isFinite(parsed) && parsed > stamp) stamp = parsed;
+  }
+  return new Date(stamp).toISOString();
+}

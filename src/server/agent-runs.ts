@@ -12,7 +12,13 @@ import {
 import { modelIdSchema } from "../lib/schemas";
 import { Storage, StorageCorruptionError } from "./storage";
 
-export const AGENT_RUN_VERSION = 1 as const;
+/**
+ * Written version. Version 1 records (Phase 24) lack the cancellation fields
+ * and are still accepted on read; everything is normalized to version 2.
+ */
+export const AGENT_RUN_VERSION = 2 as const;
+/** Version 1 records (Phase 24) are still accepted and normalized on read. */
+const AGENT_RUN_READABLE_VERSIONS = [1, AGENT_RUN_VERSION] as const;
 export const AGENT_RUNS_DIR = "agent-runs";
 export const AGENT_EVENTS_DIR = "agent-events";
 export const AGENT_RUN_LIST_LIMIT = 50;
@@ -21,8 +27,32 @@ export const AGENT_RUN_MAX_LIST_LIMIT = 200;
 export const agentRunKindSchema = z.enum(["verification", "task"]);
 export type AgentRunKind = z.infer<typeof agentRunKindSchema>;
 
-export const agentRunLifecycleSchema = z.enum(["running", "completed", "failed"]);
+/**
+ * `running` -> `cancelling` -> terminal, or `running` -> `hung` when the
+ * watchdog grace period expires before any terminal result; `hung` marks the
+ * run for Phase 26 forced cleanup. Terminal statuses are `completed` and
+ * `failed`; `completed` only means the worker delivered a terminal result, so
+ * always surface `stopReason` too.
+ */
+export const agentRunLifecycleSchema = z.enum([
+  "running",
+  "cancelling",
+  "hung",
+  "completed",
+  "failed",
+]);
 export type AgentRunLifecycle = z.infer<typeof agentRunLifecycleSchema>;
+
+export const agentRunCancelReasonSchema = z.enum(["user", "watchdog"]);
+export type AgentRunCancelReason = z.infer<typeof agentRunCancelReasonSchema>;
+
+export function isActiveAgentRunStatus(status: AgentRunLifecycle): boolean {
+  return status === "running" || status === "cancelling" || status === "hung";
+}
+
+export function isTerminalAgentRunStatus(status: AgentRunLifecycle): boolean {
+  return status === "completed" || status === "failed";
+}
 
 export const agentRunEvaluationSchema = z.strictObject({
   status: z.enum(["not_evaluated", "passed", "failed"]),
@@ -42,33 +72,79 @@ export type AgentRunWorker = z.infer<typeof agentRunWorkerSchema>;
  * Durable run summary. One JSON snapshot per run, atomically replaced; the
  * chronological SDK trace lives in `agent-events/<runId>.jsonl` instead.
  */
-export const agentRunRecordSchema = z.strictObject({
-  version: z.literal(AGENT_RUN_VERSION),
-  runId: z.uuid(),
-  kind: agentRunKindSchema,
-  task: z.string().min(1).max(AGENT_WORKER_MAX_TASK_CHARS),
-  modelId: modelIdSchema,
-  origin: z.string().min(1).max(300),
-  limits: agentRunLimitsSchema,
-  status: agentRunLifecycleSchema,
-  stopReason: agentRunStatusSchema.nullable(),
-  startedAt: z.iso.datetime(),
-  endedAt: z.iso.datetime().nullable(),
-  updatedAt: z.iso.datetime(),
-  steps: z.number().int().nonnegative().nullable(),
-  durationMs: z.number().int().nonnegative().nullable(),
-  outputText: z.string().max(AGENT_WORKER_MAX_OUTPUT_CHARS).nullable(),
-  error: z.string().max(AGENT_WORKER_MAX_ERROR_CHARS).nullable(),
-  usage: agentWorkerUsageSchema.nullable(),
-  imageInputObserved: z.boolean(),
-  vision: z.enum(["observed", "unverified"]),
-  evaluation: agentRunEvaluationSchema,
-  uiEvidence: z.enum(["observed", "unverified"]),
-  worker: agentRunWorkerSchema.nullable(),
-  eventCount: z.number().int().nonnegative(),
-  lastSeq: z.number().int().nonnegative(),
-});
-export type AgentRunRecord = z.infer<typeof agentRunRecordSchema>;
+export const agentRunRecordSchema = z
+  .strictObject({
+    version: z.union([
+      z.literal(AGENT_RUN_READABLE_VERSIONS[0]),
+      z.literal(AGENT_RUN_READABLE_VERSIONS[1]),
+    ]),
+    runId: z.uuid(),
+    kind: agentRunKindSchema,
+    task: z.string().min(1).max(AGENT_WORKER_MAX_TASK_CHARS),
+    modelId: modelIdSchema,
+    origin: z.string().min(1).max(300),
+    limits: agentRunLimitsSchema,
+    status: agentRunLifecycleSchema,
+    stopReason: agentRunStatusSchema.nullable(),
+    startedAt: z.iso.datetime(),
+    endedAt: z.iso.datetime().nullable(),
+    updatedAt: z.iso.datetime(),
+    steps: z.number().int().nonnegative().nullable(),
+    durationMs: z.number().int().nonnegative().nullable(),
+    outputText: z.string().max(AGENT_WORKER_MAX_OUTPUT_CHARS).nullable(),
+    error: z.string().max(AGENT_WORKER_MAX_ERROR_CHARS).nullable(),
+    usage: agentWorkerUsageSchema.nullable(),
+    imageInputObserved: z.boolean(),
+    vision: z.enum(["observed", "unverified"]),
+    evaluation: agentRunEvaluationSchema,
+    uiEvidence: z.enum(["observed", "unverified"]),
+    worker: agentRunWorkerSchema.nullable(),
+    eventCount: z.number().int().nonnegative(),
+    lastSeq: z.number().int().nonnegative(),
+    // Optional only for version 1 records; version 2 requires them.
+    cancelRequestedAt: z.iso.datetime().nullable().optional(),
+    cancelReason: agentRunCancelReasonSchema.nullable().optional(),
+    watchdogExpiredAt: z.iso.datetime().nullable().optional(),
+  })
+  .superRefine((value, context) => {
+    if (value.version !== AGENT_RUN_VERSION) return;
+    for (const field of [
+      "cancelRequestedAt",
+      "cancelReason",
+      "watchdogExpiredAt",
+    ] as const) {
+      if (value[field] === undefined) {
+        context.addIssue({
+          code: "custom",
+          message: `${field} is required for version ${AGENT_RUN_VERSION} records.`,
+          path: [field],
+        });
+      }
+    }
+  });
+
+type RawAgentRunRecord = z.infer<typeof agentRunRecordSchema>;
+
+/** Normalized in-memory shape: version 2 with every field present. */
+export type AgentRunRecord = Omit<
+  RawAgentRunRecord,
+  "version" | "cancelRequestedAt" | "cancelReason" | "watchdogExpiredAt"
+> & {
+  version: typeof AGENT_RUN_VERSION;
+  cancelRequestedAt: string | null;
+  cancelReason: AgentRunCancelReason | null;
+  watchdogExpiredAt: string | null;
+};
+
+export function normalizeAgentRunRecord(raw: RawAgentRunRecord): AgentRunRecord {
+  return {
+    ...raw,
+    version: AGENT_RUN_VERSION,
+    cancelRequestedAt: raw.cancelRequestedAt ?? null,
+    cancelReason: raw.cancelReason ?? null,
+    watchdogExpiredAt: raw.watchdogExpiredAt ?? null,
+  };
+}
 
 export class AgentRunError extends Error {
   constructor(message: string, options?: ErrorOptions) {
@@ -111,7 +187,7 @@ export function parseAgentRunRecord(value: unknown): AgentRunRecord {
       { cause: parsed.error },
     );
   }
-  return parsed.data;
+  return normalizeAgentRunRecord(parsed.data);
 }
 
 export async function saveAgentRun(

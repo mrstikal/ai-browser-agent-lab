@@ -26,7 +26,7 @@ import {
   resetPaidOperationsForTests,
 } from "../src/server/paid-operation";
 import { Storage } from "../src/server/storage";
-import { attemptId } from "./helpers/image-fixtures";
+import { attemptId, monotonicStamp } from "./helpers/image-fixtures";
 
 const tempDirs: string[] = [];
 const servers: Server[] = [];
@@ -466,7 +466,7 @@ describe("image job admission", () => {
     await saveImageJob(storage, {
       ...(stored as NonNullable<typeof stored>),
       status: "stopped_by_user",
-      updatedAt: new Date().toISOString(),
+      updatedAt: monotonicStamp(stored?.updatedAt),
     });
     const finished = await requestImageJobStop({
       storage,

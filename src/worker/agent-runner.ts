@@ -139,6 +139,7 @@ async function runWorker(): Promise<number> {
     phase: "waiting" as "waiting" | "running" | "finished",
     runId: null as string | null,
     cancelled: false,
+    parentDisconnected: false,
     protocolViolation: false,
     sequence: 0,
     eventsEmitted: 0,
@@ -274,6 +275,15 @@ async function runWorker(): Promise<number> {
     };
   };
 
+  const statusFallback = (status: AgentRunStatus): string => {
+    if (status === "cancelled") return "The run was cancelled before it completed.";
+    if (status === "timeout") return "The run reached its wall-clock timeout.";
+    if (status === "cost_limit") return "The run reached its soft cost limit.";
+    if (status === "max_steps") return "The run reached its step limit.";
+    if (status === "context_limit") return "The run reached its context limit.";
+    return "The SDK run did not complete.";
+  };
+
   const resultMessage = (
     runId: string,
     outcome: RunOutcome,
@@ -299,12 +309,10 @@ async function runWorker(): Promise<number> {
         status === "completed"
           ? null
           : redactText(
-              outcome.thrown ??
-                rawError ??
-                "The SDK run did not complete.",
+              outcome.thrown ?? rawError ?? statusFallback(status),
               key,
             ).slice(0, AGENT_WORKER_MAX_ERROR_CHARS) ||
-            "The SDK run did not complete.",
+            statusFallback(status),
       steps: safeInt(result?.steps),
       durationMs: safeInt(result?.durationMs),
       usage: usageFrom(result),
@@ -426,7 +434,9 @@ async function runWorker(): Promise<number> {
       const delivered = await sendFinal(resultMessage(message.runId, outcome));
       if (!delivered) {
         logError(
-          "The worker could not deliver its final result over IPC.",
+          state.parentDisconnected
+            ? "The parent process disconnected before the worker could deliver its result."
+            : "The worker could not deliver its final result over IPC.",
           key,
         );
         return 1;
@@ -457,6 +467,31 @@ async function runWorker(): Promise<number> {
   let resolveExit: (code: number) => void = () => undefined;
   const exitPromise = new Promise<number>((resolve) => {
     resolveExit = resolve;
+  });
+
+  // A lost parent is treated as a cancellation: abort the SDK run, close the
+  // browser, and exit. Forced cleanup of a worker that ignores the abort is
+  // the supervisor's job after its watchdog grace period.
+  process.on("disconnect", () => {
+    state.parentDisconnected = true;
+    if (state.phase === "waiting") {
+      logError(
+        "The parent process disconnected before the run started; exiting without a run.",
+        key,
+      );
+      state.phase = "finished";
+      resolveExit(1);
+      return;
+    }
+    if (state.phase === "running") {
+      logError(
+        "The parent process disconnected; cancelling the run and closing the browser.",
+        key,
+      );
+      requestCancel();
+      return;
+    }
+    logError("The parent process disconnected after the run finished.", key);
   });
 
   process.on("message", (raw: unknown) => {

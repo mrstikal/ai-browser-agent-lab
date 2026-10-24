@@ -188,6 +188,19 @@ async function readMarker<T>(
   return JSON.parse(await readFile(join(markersDir, name), "utf8")) as T;
 }
 
+async function waitForMarkerFile(
+  markersDir: string,
+  name: string,
+  timeoutMs = 10_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await pathExists(join(markersDir, name))) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Timed out waiting for the worker marker ${name}.`);
+}
+
 async function pathExists(path: string): Promise<boolean> {
   try {
     await stat(path);
@@ -404,6 +417,58 @@ describe("isolated agent worker", () => {
   );
 
   it(
+    "treats an IPC disconnect as a cooperative cancel and still closes the browser",
+    { timeout: 30_000 },
+    async () => {
+      const base = await makeBase();
+      const dataDir = join(base, "data");
+      const markersDir = join(base, "markers");
+      const worker = startWorker(workerEnv(dataDir, markersDir, "hang"));
+
+      await worker.waitFor("ready");
+      worker.send(startMessage());
+      await worker.waitFor("started");
+      await waitForMarkerFile(markersDir, "run.json");
+
+      worker.child.disconnect();
+      const exit = await worker.waitForExit();
+
+      expect(exit.code).toBe(1);
+      expect(exit.stderr).toContain("parent process disconnected");
+      expect(exit.stderr).toContain("cancelling the run");
+      expect(worker.messages.some((message) => message.type === "result")).toBe(
+        false,
+      );
+      const close = await readMarker<Record<string, unknown>>(
+        markersDir,
+        "close.json",
+      );
+      expect(close.count).toBe(1);
+      expect(await pathExists(profileDirFor(dataDir))).toBe(false);
+    },
+  );
+
+  it(
+    "exits without a run when the parent disconnects before the start",
+    { timeout: 30_000 },
+    async () => {
+      const base = await makeBase();
+      const dataDir = join(base, "data");
+      const markersDir = join(base, "markers");
+      const worker = startWorker(workerEnv(dataDir, markersDir, "success"));
+
+      await worker.waitFor("ready");
+      worker.child.disconnect();
+      const exit = await worker.waitForExit();
+
+      expect(exit.code).toBe(1);
+      expect(exit.stderr).toContain("disconnected before the run started");
+      expect(await pathExists(join(markersDir, "create.json"))).toBe(false);
+      expect(await pathExists(profileDirFor(dataDir))).toBe(false);
+    },
+  );
+
+  it(
     "reports a launch failure as a terminal error and removes the profile",
     { timeout: 30_000 },
     async () => {
@@ -611,7 +676,10 @@ describe("isolated agent worker", () => {
       const exit = await worker.waitForExit();
 
       expect(exit.code).toBe(1);
-      expect(exit.stderr).toContain("could not deliver its final result");
+      // Since Phase 25 the worker recognizes the lost parent and says so.
+      expect(exit.stderr).toContain(
+        "parent process disconnected before the worker could deliver its result",
+      );
       expect(worker.messages.some((message) => message.type === "result")).toBe(
         false,
       );

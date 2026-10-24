@@ -39,7 +39,7 @@ import { readLockMetadata } from "../src/server/lock";
 import { DEFAULT_IMAGE_MODEL_ID } from "../src/server/model-settings";
 import { resetPaidOperationsForTests } from "../src/server/paid-operation";
 import { Storage } from "../src/server/storage";
-import { attemptId, pngBytes } from "./helpers/image-fixtures";
+import { attemptId, monotonicStamp, pngBytes } from "./helpers/image-fixtures";
 
 const tempDirs: string[] = [];
 const servers: Server[] = [];
@@ -332,11 +332,12 @@ describe("image restart recovery", () => {
     await seedValidImages(storage, 23);
     const jobId = await saveRunningJob(storage);
     const job = await loadImageJob(storage);
+    const stoppedStamp = monotonicStamp(job?.updatedAt);
     await saveImageJob(storage, {
       ...(job as NonNullable<typeof job>),
       status: "stopping",
-      stopRequest: { jobId, requestedAt: new Date().toISOString() },
-      updatedAt: new Date().toISOString(),
+      stopRequest: { jobId, requestedAt: stoppedStamp },
+      updatedAt: stoppedStamp,
     });
 
     const result = await recoverInterruptedImageState({ storage });

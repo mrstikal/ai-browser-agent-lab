@@ -5,7 +5,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   AGENT_RUN_DEFAULT_LIMITS,
   AGENT_WORKER_MAX_EVENTS,
@@ -14,10 +14,13 @@ import {
 import { HEALTH_MARKER } from "../src/lib/health";
 import { saveAgentCompatibility } from "../src/server/agent-compatibility";
 import {
+  AGENT_CANCEL_GRACE_MS,
   AGENT_VERIFICATION_LIMITS,
+  AGENT_WATCHDOG_MARGIN_MS,
   AgentWorkerUnavailableError,
   buildAgentWorkerCommand,
   buildVerificationTask,
+  cancelAgentRun,
   getActiveAgentRunId,
   loadAgentStatus,
   readInstalledSdkVersion,
@@ -26,6 +29,7 @@ import {
   startAgentRun,
 } from "../src/server/agent-manager";
 import {
+  isTerminalAgentRunStatus,
   listAgentRuns,
   loadAgentEvents,
   loadAgentRun,
@@ -168,10 +172,61 @@ async function waitForTerminal(
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const record = await loadAgentRun(storage, runId);
-    if (record && record.status !== "running") return record;
+    if (record && isTerminalAgentRunStatus(record.status)) return record;
     await sleep(25);
   }
   throw new Error("Timed out waiting for the mocked agent run to finish.");
+}
+
+async function waitForRunStatus(
+  storage: Storage,
+  runId: string,
+  expected: AgentRunRecord["status"],
+  timeoutMs = 5_000,
+): Promise<AgentRunRecord> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const record = await loadAgentRun(storage, runId);
+    if (record?.status === expected) return record;
+    await sleep(10);
+  }
+  throw new Error(`Timed out waiting for run status ${expected}.`);
+}
+
+async function readMarker<T>(markersDir: string, name: string): Promise<T> {
+  return JSON.parse(await readFile(join(markersDir, name), "utf8")) as T;
+}
+
+/** Fake-timer safe record polling (setImmediate and Date stay real). */
+async function waitForRecord(
+  storage: Storage,
+  runId: string,
+  predicate: (record: AgentRunRecord) => boolean,
+  timeoutMs = 10_000,
+): Promise<AgentRunRecord> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const record = await loadAgentRun(storage, runId);
+    if (record && predicate(record)) return record;
+    if (Date.now() >= deadline) {
+      throw new Error("Timed out waiting for the agent run record state.");
+    }
+    await new Promise<void>((resolvePromise) => setImmediate(resolvePromise));
+  }
+}
+
+async function waitForMarkerFile(
+  markersDir: string,
+  name: string,
+  timeoutMs = 10_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (existsSync(join(markersDir, name))) return;
+    // Fake-timer safe: setImmediate and Date stay real in these tests.
+    await new Promise<void>((resolvePromise) => setImmediate(resolvePromise));
+  }
+  throw new Error(`Timed out waiting for the worker marker ${name}.`);
 }
 
 async function waitForIdle(storage: Storage, timeoutMs = 10_000): Promise<void> {
@@ -579,7 +634,7 @@ describe("agent supervisor", () => {
 
       const limits: AgentRunLimits = { ...AGENT_VERIFICATION_LIMITS };
       const older: AgentRunRecord = {
-        version: 1,
+        version: 2,
         runId: randomUUID(),
         kind: "verification",
         task: "Older verification run.",
@@ -603,6 +658,9 @@ describe("agent supervisor", () => {
         worker: null,
         eventCount: 0,
         lastSeq: 0,
+        cancelRequestedAt: null,
+        cancelReason: null,
+        watchdogExpiredAt: null,
       };
       await saveAgentRun(context.storage, older);
 
@@ -781,6 +839,314 @@ describe("agent supervisor", () => {
     expect(status.gate.keyAvailable).toBe(false);
     expect(await context.storage.listFiles(["secrets"])).toContain(tempName);
   });
+
+  it(
+    "cancels a running mocked run cooperatively and records the cancel",
+    { timeout: 30_000 },
+    async () => {
+      const context = await makeContext("hang");
+      await seedKey(context);
+      await seedStamp(context);
+
+      const started = await startAgentRun({
+        kind: "task",
+        task: "Read the main heading.",
+        env: context.env,
+        storage: context.storage,
+      });
+      expect(started.status).toBe("started");
+      if (started.status !== "started") return;
+      const runId = started.run.runId;
+      await waitForMarkerFile(context.markersDir, "run.json");
+
+      expect(cancelAgentRun({
+        runId,
+        env: context.env,
+        storage: context.storage,
+      })).toEqual({ status: "cancelling", runId });
+
+      const cancelling = await waitForRunStatus(
+        context.storage,
+        runId,
+        "cancelling",
+      );
+      expect(cancelling.cancelReason).toBe("user");
+      expect(cancelling.cancelRequestedAt).not.toBeNull();
+      expect(cancelling.watchdogExpiredAt).toBeNull();
+
+      const finished = await waitForTerminal(context.storage, runId);
+      await waitForIdle(context.storage);
+
+      expect(finished).toMatchObject({
+        status: "completed",
+        stopReason: "cancelled",
+        cancelReason: "user",
+        watchdogExpiredAt: null,
+      });
+      expect(finished.error).toContain("cancelled");
+      const cancel = await readMarker<Record<string, unknown>>(
+        context.markersDir,
+        "cancel.json",
+      );
+      expect(cancel.cancelCount).toBeGreaterThanOrEqual(1);
+      const close = await readMarker<Record<string, unknown>>(
+        context.markersDir,
+        "close.json",
+      );
+      expect(close.count).toBe(1);
+      expect(
+        existsSync(join(context.dataDir, "browser-profiles", runId)),
+      ).toBe(false);
+      expect(
+        await readLockMetadata(context.storage.path(PAID_JOB_LOCK_SEGMENTS)),
+      ).toBeUndefined();
+      expect(getActiveAgentRunId(context.storage.root)).toBeNull();
+      expect(JSON.stringify(finished)).not.toContain(TEST_KEY);
+    },
+  );
+
+  it(
+    "reports no active run or a mismatched run for a cancel request",
+    { timeout: 30_000 },
+    async () => {
+      const context = await makeContext("hang");
+      await seedKey(context);
+      await seedStamp(context);
+
+      expect(
+        cancelAgentRun({ env: context.env, storage: context.storage }),
+      ).toEqual({ status: "no-active-run" });
+
+      const started = await startAgentRun({
+        kind: "task",
+        task: "Read the main heading.",
+        env: context.env,
+        storage: context.storage,
+      });
+      expect(started.status).toBe("started");
+      if (started.status !== "started") return;
+      await waitForMarkerFile(context.markersDir, "run.json");
+
+      expect(
+        cancelAgentRun({
+          runId: randomUUID(),
+          env: context.env,
+          storage: context.storage,
+        }),
+      ).toEqual({ status: "run-mismatch", activeRunId: started.run.runId });
+
+      // The mismatched request must not have cancelled the active run.
+      expect((await loadAgentRun(context.storage, started.run.runId))?.status).toBe(
+        "running",
+      );
+      await cancelAgentRun({
+        runId: started.run.runId,
+        env: context.env,
+        storage: context.storage,
+      });
+      const finished = await waitForTerminal(
+        context.storage,
+        started.run.runId,
+      );
+      await waitForIdle(context.storage);
+      expect(finished).toMatchObject({
+        status: "completed",
+        stopReason: "cancelled",
+      });
+    },
+  );
+
+  it(
+    "records an SDK-reported timeout as a distinct terminal status",
+    { timeout: 30_000 },
+    async () => {
+      const context = await makeContext("timeout");
+      await seedKey(context);
+      await seedStamp(context);
+
+      const started = await startAgentRun({
+        kind: "task",
+        task: "Read the main heading.",
+        env: context.env,
+        storage: context.storage,
+      });
+      expect(started.status).toBe("started");
+      if (started.status !== "started") return;
+      const finished = await waitForTerminal(
+        context.storage,
+        started.run.runId,
+      );
+      await waitForIdle(context.storage);
+
+      expect(finished).toMatchObject({
+        status: "completed",
+        stopReason: "timeout",
+        cancelRequestedAt: null,
+        watchdogExpiredAt: null,
+      });
+      expect(finished.error).toContain("wall-clock timeout");
+    },
+  );
+
+  it(
+    "marks a hung mock for forced cleanup after the watchdog grace (fake timers)",
+    { timeout: 30_000 },
+    async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        const context = await makeContext("hang-forever");
+        await seedKey(context);
+        await seedStamp(context);
+
+        const started = await startAgentRun({
+          kind: "task",
+          task: "Read the main heading.",
+          limits: { timeoutMs: 10_000 },
+          env: context.env,
+          storage: context.storage,
+        });
+        expect(started.status).toBe("started");
+        if (started.status !== "started") return;
+        const runId = started.run.runId;
+        await waitForMarkerFile(context.markersDir, "run.json");
+
+        // Watchdog: SDK timeout plus margin -> cooperative cancel.
+        await vi.advanceTimersByTimeAsync(10_000 + AGENT_WATCHDOG_MARGIN_MS);
+        await waitForMarkerFile(context.markersDir, "cancel.json");
+        const cancelling = await waitForRecord(
+          context.storage,
+          runId,
+          (record) => record.status === "cancelling",
+        );
+        expect(cancelling.cancelReason).toBe("watchdog");
+        expect(cancelling.cancelRequestedAt).not.toBeNull();
+
+        // Grace period expires with an SDK that ignores the abort.
+        await vi.advanceTimersByTimeAsync(AGENT_CANCEL_GRACE_MS);
+        const hung = await waitForRecord(
+          context.storage,
+          runId,
+          (record) => record.status === "hung",
+        );
+        expect(hung.watchdogExpiredAt).not.toBeNull();
+        expect(hung.endedAt).toBeNull();
+        expect(hung.error).toContain("forced cleanup");
+
+        // The hung run keeps the paid lock and the active registration until
+        // the process is proven gone; Phase 26 owns the forced kill.
+        expect(
+          await readLockMetadata(context.storage.path(PAID_JOB_LOCK_SEGMENTS)),
+        ).toBeDefined();
+        expect(getActiveAgentRunId(context.storage.root)).toBe(runId);
+        expect(isPaidOperationActive()).toBe(true);
+        expect(
+          existsSync(join(context.dataDir, "browser-profiles", runId)),
+        ).toBe(true);
+        expect(
+          cancelAgentRun({
+            runId,
+            env: context.env,
+            storage: context.storage,
+          }),
+        ).toEqual({ status: "run-hung", runId });
+
+        // Forced cleanup stand-in: kill the process, then the supervisor may
+        // release the lock because ownership is now proven gone.
+        const pid = started.run.worker?.pid ?? 0;
+        expect(pid).toBeGreaterThan(0);
+        process.kill(pid, "SIGKILL");
+        const deadline = Date.now() + 10_000;
+        while (
+          Date.now() < deadline &&
+          (await readLockMetadata(
+            context.storage.path(PAID_JOB_LOCK_SEGMENTS),
+          ).catch(() => null)) !== undefined
+        ) {
+          await new Promise<void>((resolvePromise) =>
+            setImmediate(resolvePromise),
+          );
+        }
+        expect(
+          await readLockMetadata(context.storage.path(PAID_JOB_LOCK_SEGMENTS)),
+        ).toBeUndefined();
+        expect(getActiveAgentRunId(context.storage.root)).toBeNull();
+        expect(isPaidOperationActive()).toBe(false);
+        const finalized = await loadAgentRun(context.storage, runId);
+        expect(finalized?.status).toBe("failed");
+        expect(finalized?.watchdogExpiredAt).not.toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it(
+    "settles the watchdog cancel cooperatively when the SDK honours the abort",
+    { timeout: 30_000 },
+    async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      let context: TestContext | undefined;
+      let runId = "";
+      try {
+        context = await makeContext("hang");
+        await seedKey(context);
+        await seedStamp(context);
+        const started = await startAgentRun({
+          kind: "task",
+          task: "Read the main heading.",
+          limits: { timeoutMs: 10_000 },
+          env: context.env,
+          storage: context.storage,
+        });
+        expect(started.status).toBe("started");
+        if (started.status !== "started") return;
+        runId = started.run.runId;
+        await waitForMarkerFile(context.markersDir, "run.json");
+
+        await vi.advanceTimersByTimeAsync(10_000 + AGENT_WATCHDOG_MARGIN_MS);
+        const cancelling = await waitForRecord(
+          context.storage,
+          runId,
+          (record) => record.status === "cancelling",
+        );
+        expect(cancelling.cancelReason).toBe("watchdog");
+
+        // The fake SDK settles 150 ms (real time) after the abort.
+        const finished = await waitForRecord(
+          context.storage,
+          runId,
+          (record) => isTerminalAgentRunStatus(record.status),
+          20_000,
+        );
+        expect(finished).toMatchObject({
+          status: "completed",
+          stopReason: "cancelled",
+          cancelReason: "watchdog",
+          watchdogExpiredAt: null,
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+      if (!context) return;
+      await waitForMarkerFile(context.markersDir, "close.json");
+      const close = await readMarker<Record<string, unknown>>(
+        context.markersDir,
+        "close.json",
+      );
+      expect(close.count).toBe(1);
+      expect(
+        existsSync(join(context.dataDir, "browser-profiles", runId)),
+      ).toBe(false);
+      await waitForIdle(context.storage);
+      const finalized = await loadAgentRun(context.storage, runId);
+      expect(finalized).toMatchObject({
+        status: "completed",
+        stopReason: "cancelled",
+        cancelReason: "watchdog",
+        watchdogExpiredAt: null,
+      });
+    },
+  );
 
   it("removes the key and keeps the status gate honest", async () => {
     const context = await makeContext("success");

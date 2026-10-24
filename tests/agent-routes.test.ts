@@ -1,17 +1,24 @@
+import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as cancelRoute from "@/app/api/agent/runs/cancel/route";
 import * as runsRoute from "@/app/api/agent/runs/route";
 import * as statusRoute from "@/app/api/agent/status/route";
 import { saveAgentCompatibility } from "@/server/agent-compatibility";
 import {
+  AGENT_CANCEL_GRACE_MS,
+  AGENT_WATCHDOG_MARGIN_MS,
   readInstalledSdkVersion,
   resetAgentSupervisorForTests,
 } from "@/server/agent-manager";
-import type { AgentRunRecord } from "@/server/agent-runs";
+import {
+  isTerminalAgentRunStatus,
+  type AgentRunRecord,
+} from "@/server/agent-runs";
 import {
   resetCredentialHolderForTests,
   setOpenRouterKey,
@@ -95,7 +102,11 @@ async function waitForRun(
     const run = status.runs.find((candidate) => candidate.runId === runId);
     // The run reaches a terminal state before the worker process exits; wait
     // for the supervisor to release the run so activeRunId is authoritative.
-    if (run && run.status !== "running" && status.activeRunId === null) {
+    if (
+      run &&
+      isTerminalAgentRunStatus(run.status) &&
+      status.activeRunId === null
+    ) {
       return run;
     }
     await sleep(25);
@@ -263,6 +274,123 @@ describe("agent run API routes", () => {
       const body = (await response.json()) as { error: { code: string } };
       expect(body.error.code).toBe("key-required");
       expect(await storage.listFiles(["agent-runs"])).toHaveLength(0);
+    },
+  );
+
+  it(
+    "cancels an active run cooperatively and rejects unknown or mismatched runs",
+    { timeout: 45_000 },
+    async () => {
+      await seedKeyAndStamp();
+      process.env.AGENT_WORKER_FAKE_MODE = "hang";
+
+      const missing = await cancelRoute.POST(
+        makeRequest("/api/agent/runs/cancel", { runId: randomUUID() }),
+      );
+      expect(missing.status).toBe(409);
+      expect(
+        ((await missing.json()) as { error: { code: string } }).error.code,
+      ).toBe("no-active-run");
+
+      const started = await runsRoute.POST(
+        makeRequest("/api/agent/runs", { task: "Read the main heading." }),
+      );
+      expect(started.status).toBe(200);
+      const startedBody = (await started.json()) as { run: AgentRunRecord };
+      const runId = startedBody.run.runId;
+
+      const mismatched = await cancelRoute.POST(
+        makeRequest("/api/agent/runs/cancel", { runId: randomUUID() }),
+      );
+      expect(mismatched.status).toBe(409);
+      const mismatchedBody = (await mismatched.json()) as {
+        error: { code: string };
+        activeRunId: string;
+      };
+      expect(mismatchedBody.error.code).toBe("run-mismatch");
+      expect(mismatchedBody.activeRunId).toBe(runId);
+      expect(
+        (await runsRoute.POST(
+          makeRequest("/api/agent/runs", { task: "Read the footer." }),
+        )).status,
+      ).toBe(409);
+
+      const cancelled = await cancelRoute.POST(
+        makeRequest("/api/agent/runs/cancel", { runId }),
+      );
+      expect(cancelled.status).toBe(200);
+      expect((await cancelled.json()) as { ok: boolean }).toMatchObject({
+        ok: true,
+        runId,
+      });
+
+      const finished = await waitForRun(runId);
+      expect(finished).toMatchObject({
+        status: "completed",
+        stopReason: "cancelled",
+        cancelReason: "user",
+      });
+      expect(JSON.stringify(finished)).not.toContain(TEST_KEY);
+    },
+  );
+
+  it(
+    "reports a hung run as needing forced cleanup instead of a cancel",
+    { timeout: 45_000 },
+    async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      let runId = "";
+      let pid = 0;
+      try {
+        await seedKeyAndStamp();
+        process.env.AGENT_WORKER_FAKE_MODE = "hang-forever";
+
+        const started = await runsRoute.POST(
+          makeRequest("/api/agent/runs", {
+            task: "Read the main heading.",
+            limits: { timeoutMs: 10_000 },
+          }),
+        );
+        expect(started.status).toBe(200);
+        const startedBody = (await started.json()) as { run: AgentRunRecord };
+        runId = startedBody.run.runId;
+        pid = startedBody.run.worker?.pid ?? 0;
+        expect(pid).toBeGreaterThan(0);
+
+        await vi.advanceTimersByTimeAsync(
+          10_000 + AGENT_WATCHDOG_MARGIN_MS + AGENT_CANCEL_GRACE_MS,
+        );
+
+        const cancelled = await cancelRoute.POST(
+          makeRequest("/api/agent/runs/cancel", { runId }),
+        );
+        expect(cancelled.status).toBe(409);
+        const cancelledBody = (await cancelled.json()) as {
+          error: { code: string };
+        };
+        expect(cancelledBody.error.code).toBe("run-hung");
+      } finally {
+        vi.useRealTimers();
+      }
+
+      // Forced cleanup stand-in (Phase 26 owns the real group termination).
+      if (pid > 0) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          // The process may already be gone.
+        }
+      }
+      const deadline = Date.now() + 10_000;
+      let status = await getStatus();
+      while (Date.now() < deadline && status.activeRunId !== null) {
+        await sleep(50);
+        status = await getStatus();
+      }
+      expect(status.activeRunId).toBeNull();
+      const hung = status.runs.find((run) => run.runId === runId);
+      expect(hung?.watchdogExpiredAt).not.toBeNull();
+      expect(hung?.status).toBe("failed");
     },
   );
 

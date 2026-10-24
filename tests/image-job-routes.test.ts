@@ -31,7 +31,7 @@ import {
   setOpenRouterKey,
 } from "@/server/credentials";
 import { Storage } from "@/server/storage";
-import { attemptId, pngBytes } from "./helpers/image-fixtures";
+import { attemptId, monotonicStamp, pngBytes } from "./helpers/image-fixtures";
 
 const tempDirs: string[] = [];
 const servers: Server[] = [];
@@ -319,7 +319,7 @@ describe("image job start route", () => {
     await saveImageJob(storage, {
       ...persisted,
       status: "failed",
-      updatedAt: new Date().toISOString(),
+      updatedAt: monotonicStamp(persisted.updatedAt),
     });
     const rejected = await startRoute.POST(
       makeRequest("POST", "/api/images/job/start", {
@@ -470,7 +470,7 @@ describe("image job stop route", () => {
     await saveImageJob(storage, {
       ...(stopped as NonNullable<typeof stopped>),
       status: "stopped_by_user",
-      updatedAt: new Date().toISOString(),
+      updatedAt: monotonicStamp(stopped?.updatedAt),
     });
     const finished = await stopRoute.POST(
       makeRequest("POST", "/api/images/job/stop", { jobId }),

@@ -59,18 +59,40 @@ const agent = {
     }
     if (mode === "hang") {
       return await new Promise((resolve) => {
+        // A short delay after the abort keeps the supervisor's `cancelling`
+        // state observable before the terminal message arrives.
         const finish = () =>
-          resolve({
-            status: "cancelled",
-            text: "cancelled by the supervisor",
-            steps: 1,
-            durationMs: 25,
-            usage,
-            workspace: "",
-          });
+          setTimeout(
+            () =>
+              resolve({
+                status: "cancelled",
+                text: "cancelled by the supervisor",
+                steps: 1,
+                durationMs: 25,
+                usage,
+                workspace: "",
+              }),
+            150,
+          );
         if (options.signal?.aborted) finish();
         else options.signal?.addEventListener("abort", finish, { once: true });
       });
+    }
+    if (mode === "hang-forever") {
+      // Ignores the abort signal entirely: the supervisor watchdog must mark
+      // this run for forced cleanup instead of unlocking or completing it.
+      await new Promise(() => {});
+    }
+    if (mode === "timeout") {
+      return {
+        status: "timeout",
+        text: "",
+        error: "The SDK run hit its wall-clock timeout.",
+        steps: 1,
+        durationMs: 40,
+        usage,
+        workspace: "",
+      };
     }
     if (mode === "wait-for-disconnect") {
       const deadline = Date.now() + 10_000;
