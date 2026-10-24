@@ -9,8 +9,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { AddressInfo } from "node:net";
 import { fileURLToPath } from "node:url";
-import type { BrowserUse, BrowserUseOptions } from "@browser_use/pi";
+import type { BrowserUse } from "@browser_use/pi";
 import { nodeVersionProblem } from "./node-version.mjs";
+import { assertDisplay, withLaunchGuidance } from "./browser-launch";
 
 const HEADING = "AI Browser Agent Lab - local browser smoke";
 const PAGE = `<!doctype html>
@@ -20,11 +21,8 @@ const PAGE = `<!doctype html>
 </html>
 `;
 
-const domainOptionCheck: Pick<BrowserUseOptions, "allowedDomains" | "prohibitedDomains"> = {
-  allowedDomains: ["127.0.0.1", "localhost"],
-  prohibitedDomains: [],
-};
-void domainOptionCheck;
+const allowedDomains = ["127.0.0.1", "localhost"];
+const prohibitedDomains: string[] = [];
 
 async function installedSdkVersion(): Promise<string> {
   let directory = dirname(fileURLToPath(import.meta.resolve("@browser_use/pi")));
@@ -94,35 +92,6 @@ async function startLocalSite(): Promise<{
   };
 }
 
-function assertDisplay(): void {
-  if (headless || process.platform !== "linux") return;
-  if (process.env.DISPLAY || process.env.WAYLAND_DISPLAY) return;
-  throw new Error(
-    [
-      "No graphical display was detected (DISPLAY and WAYLAND_DISPLAY are unset).",
-      "Visible Chromium needs a desktop session, WSLg, or an X server.",
-      "On WSL, enable WSLg (Windows 11) or start an X server and export DISPLAY.",
-      "For a headless feasibility check only, run: npm run smoke:browser-local -- --headless",
-    ].join("\n"),
-  );
-}
-
-function withLaunchGuidance(error: unknown): Error {
-  const message = error instanceof Error ? error.message : String(error);
-  if (!/Chrome not found|Chrome exited|did not expose CDP|display/i.test(message)) {
-    return error instanceof Error ? error : new Error(message);
-  }
-  return new Error(
-    [
-      message,
-      "",
-      "Install Google Chrome or Chromium (for example: sudo apt install chromium),",
-      "or set an explicit browser path when using the SDK in application code.",
-      "A visible run also requires a working display; WSLg is recommended on WSL.",
-    ].join("\n"),
-  );
-}
-
 type Reading = { url: string; heading: string | null; title: string };
 
 function parseCellJson(text: string): Reading {
@@ -163,7 +132,7 @@ async function readHeading(agent: BrowserUse, url: string): Promise<Reading> {
 async function main(): Promise<void> {
   const nodeProblem = nodeVersionProblem();
   if (nodeProblem) throw new Error(nodeProblem);
-  assertDisplay();
+  assertDisplay({ headless });
   const sdkVersion = await installedSdkVersion();
   const { Browser, BrowserUse } = await import("@browser_use/pi");
   let site: Awaited<ReturnType<typeof startLocalSite>> | undefined;
@@ -176,6 +145,8 @@ async function main(): Promise<void> {
       model: "openrouter/openai/gpt-5.6-luna",
       browser: Browser.chromium({ headless }),
       workspace,
+      allowedDomains,
+      prohibitedDomains,
       telemetry: false,
       highlightActions: true,
     });
@@ -198,6 +169,23 @@ async function main(): Promise<void> {
       );
     }
 
+    let domainPolicy: "blocked" | "not-blocked" = "not-blocked";
+    try {
+      await agent.execute('await page.goto("http://example.invalid/")', {
+        timeoutMs: 5_000,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/domain policy|navigation blocked/i.test(message)) {
+        domainPolicy = "blocked";
+      }
+    }
+    if (domainPolicy !== "blocked") {
+      throw new Error(
+        "The SDK did not enforce the configured allowedDomains navigation policy.",
+      );
+    }
+
     console.log(
       JSON.stringify(
         {
@@ -207,6 +195,7 @@ async function main(): Promise<void> {
           origins: readings.map((reading) => new URL(reading.url).origin),
           allowedDomainsType:
             "string[] | undefined (compile-time checked against installed DomainOptions)",
+          domainPolicy,
           inferenceCalls: 0,
           keyRequired: false,
         },
@@ -215,7 +204,7 @@ async function main(): Promise<void> {
       ),
     );
   } catch (error) {
-    throw withLaunchGuidance(error);
+    throw withLaunchGuidance(error, { headless });
   } finally {
     if (agent) {
       await agent.close().catch((error: unknown) => {

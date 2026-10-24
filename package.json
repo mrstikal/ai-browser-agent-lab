@@ -16,6 +16,7 @@
     "test": "vitest run",
     "check:runtime": "node scripts/check-node.mjs",
     "smoke:browser-local": "node scripts/check-node.mjs && tsx scripts/browser-smoke.ts",
+    "test:agent": "node scripts/check-node.mjs && tsx scripts/agent-model-smoke.ts",
     "test:e2e": "node scripts/check-node.mjs && node scripts/run-e2e.mjs"
   },
   "dependencies": {
