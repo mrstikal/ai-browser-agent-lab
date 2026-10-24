@@ -9,6 +9,10 @@ import {
   agentWorkerUsageSchema,
   type AgentWorkerEventMessage,
 } from "../lib/agent-ipc";
+import {
+  agentCatalogTaskIdSchema,
+  type AgentCatalogTaskId,
+} from "../lib/agent-tasks";
 import { modelIdSchema } from "../lib/schemas";
 import { Storage, StorageCorruptionError } from "./storage";
 
@@ -86,6 +90,8 @@ export const agentRunRecordSchema = z
     ]),
     runId: z.uuid(),
     kind: agentRunKindSchema,
+    /** Preset catalog task ID; null for custom tasks and verification runs. */
+    presetId: agentCatalogTaskIdSchema.nullable().optional(),
     task: z.string().min(1).max(AGENT_WORKER_MAX_TASK_CHARS),
     modelId: modelIdSchema,
     origin: z.string().min(1).max(300),
@@ -134,9 +140,10 @@ type RawAgentRunRecord = z.infer<typeof agentRunRecordSchema>;
 /** Normalized in-memory shape: version 2 with every field present. */
 export type AgentRunRecord = Omit<
   RawAgentRunRecord,
-  "version" | "cancelRequestedAt" | "cancelReason" | "watchdogExpiredAt"
+  "version" | "presetId" | "cancelRequestedAt" | "cancelReason" | "watchdogExpiredAt"
 > & {
   version: typeof AGENT_RUN_VERSION;
+  presetId: AgentCatalogTaskId | null;
   cancelRequestedAt: string | null;
   cancelReason: AgentRunCancelReason | null;
   watchdogExpiredAt: string | null;
@@ -146,6 +153,7 @@ export function normalizeAgentRunRecord(raw: RawAgentRunRecord): AgentRunRecord 
   return {
     ...raw,
     version: AGENT_RUN_VERSION,
+    presetId: raw.presetId ?? null,
     cancelRequestedAt: raw.cancelRequestedAt ?? null,
     cancelReason: raw.cancelReason ?? null,
     watchdogExpiredAt: raw.watchdogExpiredAt ?? null,

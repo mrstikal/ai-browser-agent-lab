@@ -34,6 +34,7 @@ function makeRun(overrides: Partial<AgentRunRecord> = {}): AgentRunRecord {
     version: 2,
     runId: RUN_ID,
     kind: "task",
+    presetId: null,
     task: "Read the main heading.",
     modelId: "openrouter/openai/gpt-5.6-luna",
     origin: ORIGIN,

@@ -126,6 +126,24 @@ describe("agent run records", () => {
     ).not.toThrow();
   });
 
+  it("normalizes a missing preset ID and rejects unknown presets", () => {
+    const runId = randomUUID();
+    const v2 = {
+      ...phase24Record(runId),
+      version: 2,
+      cancelRequestedAt: null,
+      cancelReason: null,
+      watchdogExpiredAt: null,
+    };
+    expect(parseAgentRunRecord(v2).presetId).toBeNull();
+    expect(
+      parseAgentRunRecord({ ...v2, presetId: "catalog-out-of-stock" }).presetId,
+    ).toBe("catalog-out-of-stock");
+    expect(() =>
+      parseAgentRunRecord({ ...v2, presetId: "catalog-unknown" }),
+    ).toThrow(AgentRunCorruptionError);
+  });
+
   it("rejects unknown versions, statuses, and malformed snapshots", () => {
     const runId = randomUUID();
     expect(() =>

@@ -14,11 +14,17 @@ import {
   AGENT_WORKER_MAX_HEARTBEAT_MS,
   agentRunLimitsSchema,
   agentWorkerMessageSchema,
+  isObservedBrowserToolEvent,
   type AgentRunLimits,
   type AgentWorkerEventMessage,
   type AgentWorkerResultMessage,
 } from "../lib/agent-ipc";
 import { HEALTH_MARKER } from "../lib/health";
+import {
+  agentCatalogTaskIdSchema,
+  buildCatalogTaskInstruction,
+  type AgentCatalogTaskId,
+} from "../lib/agent-tasks";
 import {
   AgentCompatibilityError,
   loadAgentCompatibility,
@@ -149,6 +155,11 @@ export interface StartAgentRunOptions {
   /** `verification` runs the fixed heading job; `task` needs a verified model. */
   readonly kind: "verification" | "task";
   readonly task?: string | undefined;
+  /**
+   * Preset catalog task ID. The supervisor builds the neutral instruction from
+   * this ID and the configured origin; `task` must be omitted.
+   */
+  readonly presetId?: AgentCatalogTaskId | undefined;
   readonly limits?: AgentRunLimitsInput | undefined;
   /** Heartbeat interval override (tests/tuning); bounded by the protocol. */
   readonly heartbeatMs?: number | undefined;
@@ -567,30 +578,59 @@ export async function startAgentRun(
     };
   }
 
+  let presetId: AgentCatalogTaskId | null = null;
+  if (options.presetId !== undefined) {
+    if (options.kind !== "task") {
+      return {
+        status: "invalid-request",
+        message: "Only task runs can use a catalog preset.",
+      };
+    }
+    if (options.task !== undefined) {
+      return {
+        status: "invalid-request",
+        message: "Provide either a custom task or a catalog preset, not both.",
+      };
+    }
+    const parsedPreset = agentCatalogTaskIdSchema.safeParse(options.presetId);
+    if (!parsedPreset.success) {
+      return {
+        status: "invalid-request",
+        message: "The selected catalog task is invalid.",
+      };
+    }
+    presetId = parsedPreset.data;
+  }
+
   let task: string;
   let limits: AgentRunLimits;
   if (options.kind === "verification") {
     limits = { ...AGENT_VERIFICATION_LIMITS };
     task = "";
   } else {
-    const parsedTask = z
-      .string()
-      .trim()
-      .min(1)
-      .max(AGENT_WORKER_MAX_TASK_CHARS)
-      .safeParse(options.task);
-    if (!parsedTask.success) {
-      return {
-        status: "invalid-request",
-        message: `The agent task must be 1 to ${AGENT_WORKER_MAX_TASK_CHARS} characters.`,
-      };
+    if (presetId === null) {
+      const parsedTask = z
+        .string()
+        .trim()
+        .min(1)
+        .max(AGENT_WORKER_MAX_TASK_CHARS)
+        .safeParse(options.task);
+      if (!parsedTask.success) {
+        return {
+          status: "invalid-request",
+          message: `The agent task must be 1 to ${AGENT_WORKER_MAX_TASK_CHARS} characters.`,
+        };
+      }
+      task = parsedTask.data;
+    } else {
+      // Built after the configured origin is resolved below.
+      task = "";
     }
     try {
       limits = resolveAgentRunLimits(options.limits);
     } catch (error) {
       return { status: "invalid-request", message: messageOf(error) };
     }
-    task = parsedTask.data;
   }
 
   let config: AppConfig;
@@ -609,6 +649,14 @@ export async function startAgentRun(
 
   if (options.kind === "verification") {
     task = buildVerificationTask(config.origin);
+  } else if (presetId !== null) {
+    task = buildCatalogTaskInstruction(config.origin, presetId);
+    if (task.length > AGENT_WORKER_MAX_TASK_CHARS) {
+      return {
+        status: "invalid-request",
+        message: "The catalog task instruction exceeds the task length cap.",
+      };
+    }
   }
 
   let command: AgentWorkerCommand;
@@ -715,6 +763,7 @@ export async function startAgentRun(
     version: AGENT_RUN_VERSION,
     runId,
     kind: options.kind,
+    presetId,
     task,
     modelId: gate.modelId,
     origin: config.origin,
@@ -1058,6 +1107,19 @@ export async function startAgentRun(
         await appendAgentEvent(storage, message);
         record.eventCount += 1;
         record.lastSeq = Math.max(record.lastSeq, message.seq);
+        // UI evidence is only claimed for a successfully persisted browser
+        // JavaScript tool event. The SDK does not expose page-action events, so
+        // this is trace evidence that a browser tool ran, not proof that the
+        // cell used a page primitive. Delivery tools such as `finish` are not
+        // UI use, and business evaluation stays a separate field.
+        if (
+          isObservedBrowserToolEvent(message) &&
+          record.uiEvidence !== "observed"
+        ) {
+          record.uiEvidence = "observed";
+          record.updatedAt = now().toISOString();
+          persistRecord();
+        }
       } catch {
         // Counts only advance for events that really reached disk; the first
         // failure marks the trace incomplete for both terminal paths.

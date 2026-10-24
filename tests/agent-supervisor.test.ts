@@ -40,6 +40,7 @@ import {
   saveAgentRun,
   type AgentRunRecord,
 } from "../src/server/agent-runs";
+import { startCatalogTaskRun } from "../src/server/agent-task-evaluator";
 import {
   deleteOpenRouterKey,
   resetCredentialHolderForTests,
@@ -694,6 +695,7 @@ describe("agent supervisor", () => {
         version: 2,
         runId: randomUUID(),
         kind: "verification",
+        presetId: null,
         task: "Older verification run.",
         modelId: DEFAULT_BROWSER_MODEL_ID,
         origin: context.origin,
@@ -1593,4 +1595,106 @@ describe("agent supervisor", () => {
       }),
     ).toEqual({ status: "key-required" });
   });
+
+  it(
+    "persists a preset catalog evaluation with observed UI evidence",
+    { timeout: 30_000 },
+    async () => {
+      const context = await makeContext("success");
+      await seedKey(context);
+      await seedStamp(context);
+
+      const started = await startCatalogTaskRun({
+        presetId: "catalog-cheapest-home",
+        env: context.env,
+        storage: context.storage,
+      });
+      expect(started.status).toBe("started");
+      if (started.status !== "started") return;
+      expect(started.run).toMatchObject({
+        kind: "task",
+        presetId: "catalog-cheapest-home",
+        status: "running",
+        evaluation: { status: "not_evaluated", reason: null },
+      });
+      expect(started.run.task).toContain(`${context.origin}/shop`);
+      expect(started.run.task).not.toContain("Pebble Plant Pot");
+
+      await waitForTerminal(context.storage, started.run.runId);
+      await waitForIdle(context.storage);
+      const finished = await loadAgentRun(
+        context.storage,
+        started.run.runId,
+      );
+      expect(finished).toMatchObject({
+        status: "completed",
+        stopReason: "completed",
+        presetId: "catalog-cheapest-home",
+        evaluation: { status: "passed" },
+        uiEvidence: "observed",
+      });
+      expect(finished?.outputText).toContain("Pebble Plant Pot");
+    },
+  );
+
+  it(
+    "keeps a passing business result separate from unverified UI evidence",
+    { timeout: 30_000 },
+    async () => {
+      const context = await makeContext("catalog-no-events");
+      await seedKey(context);
+      await seedStamp(context);
+
+      const started = await startCatalogTaskRun({
+        presetId: "catalog-cheapest-home",
+        env: context.env,
+        storage: context.storage,
+      });
+      expect(started.status).toBe("started");
+      if (started.status !== "started") return;
+
+      await waitForTerminal(context.storage, started.run.runId);
+      await waitForIdle(context.storage);
+      const finished = await loadAgentRun(
+        context.storage,
+        started.run.runId,
+      );
+      expect(finished).toMatchObject({
+        evaluation: { status: "passed" },
+        uiEvidence: "unverified",
+      });
+    },
+  );
+
+  it(
+    "fails a preset evaluation for an invalid answer",
+    { timeout: 30_000 },
+    async () => {
+      const context = await makeContext("catalog-invalid");
+      await seedKey(context);
+      await seedStamp(context);
+
+      const started = await startCatalogTaskRun({
+        presetId: "catalog-cheapest-home",
+        env: context.env,
+        storage: context.storage,
+      });
+      expect(started.status).toBe("started");
+      if (started.status !== "started") return;
+
+      await waitForTerminal(context.storage, started.run.runId);
+      await waitForIdle(context.storage);
+      const finished = await loadAgentRun(
+        context.storage,
+        started.run.runId,
+      );
+      expect(finished).toMatchObject({
+        evaluation: { status: "failed" },
+        uiEvidence: "observed",
+      });
+      expect(finished?.evaluation.reason).toContain(
+        "did not match the required JSON shape",
+      );
+    },
+  );
 });

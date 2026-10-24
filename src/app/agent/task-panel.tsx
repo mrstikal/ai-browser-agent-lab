@@ -4,13 +4,23 @@ import { type FormEvent, useState } from "react";
 import type { AgentDashboardView } from "@/lib/agent-dashboard-view";
 import type { AgentRunLimits } from "@/lib/agent-ipc";
 import {
+  AGENT_CATALOG_TASK_PRESETS,
+  buildCatalogTaskInstruction,
+  getAgentCatalogTaskPreset,
+  isAgentCatalogTaskId,
+  type AgentCatalogTaskId,
+  type AgentTaskStartRequest,
+} from "@/lib/agent-tasks";
+import {
   describeExecutionStatus,
   describeGateBlocker,
+  describeOverallTaskResult,
   describeStopReason,
   describeTaskResult,
   formatDuration,
   formatEstimatedCost,
   formatTokens,
+  shouldShowOverallTaskResult,
   type RunTone,
 } from "@/lib/agent-run-display";
 import { formatUsd } from "@/lib/format";
@@ -32,7 +42,7 @@ export interface TaskPanelProps {
   readonly polling: boolean;
   readonly busy: DashboardAction | null;
   readonly feedback: DashboardFeedback | null;
-  readonly onRun: (task: string) => Promise<boolean>;
+  readonly onRun: (request: AgentTaskStartRequest) => Promise<boolean>;
   readonly onCancel: (runId: string) => void;
 }
 
@@ -49,11 +59,21 @@ export function TaskPanel({
   onCancel,
 }: TaskPanelProps) {
   const [task, setTask] = useState("");
+  const [selectedPresetId, setSelectedPresetId] = useState<
+    AgentCatalogTaskId | "custom"
+  >("custom");
   const { gate, activeRun, latestTask } = view;
 
+  const preset =
+    selectedPresetId === "custom"
+      ? null
+      : getAgentCatalogTaskPreset(selectedPresetId);
+  const presetInstruction =
+    preset === null ? null : buildCatalogTaskInstruction(gate.origin, preset.id);
   const trimmed = task.trim();
   const whitespaceOnly = task.length > 0 && trimmed.length === 0;
-  const valid = trimmed.length > 0 && trimmed.length <= maxTaskChars;
+  const valid =
+    preset !== null || (trimmed.length > 0 && trimmed.length <= maxTaskChars);
   const gateBlocker = describeGateBlocker(gate);
   const canRun = valid && gateBlocker === null && !runActive && busy === null;
 
@@ -63,11 +83,12 @@ export function TaskPanel({
   const isActiveTask =
     activeTask !== null && displayRun?.runId === activeTask.runId;
   const taskFeedback = feedback?.scope === "task" ? feedback : null;
+  const overall = displayRun === null ? null : describeOverallTaskResult(displayRun);
 
   async function submit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     if (!canRun) return;
-    await onRun(trimmed);
+    await onRun(preset === null ? { task: trimmed } : { presetId: preset.id });
   }
 
   return (
@@ -114,30 +135,74 @@ export function TaskPanel({
         ) : null}
 
         <form onSubmit={(event) => void submit(event)} className="space-y-3">
-          <label htmlFor="agent-task" className="block text-sm font-medium">
-            Task
-          </label>
-          <textarea
-            id="agent-task"
-            data-testid="agent-task-input"
-            value={task}
-            maxLength={maxTaskChars}
-            rows={5}
-            disabled={runActive || busy !== null}
-            onChange={(event) => setTask(event.target.value)}
-            aria-describedby="agent-task-help"
-            className="w-full rounded border border-slate-300 p-3 text-sm disabled:bg-slate-100"
-            placeholder="Read the main heading on the shop page and return it as JSON."
-          />
-          <p id="agent-task-help" className="text-xs text-slate-500">
-            {task.length} / {maxTaskChars} characters. One
-            bounded task per run; the agent works only on the local app origin.
-          </p>
-          {whitespaceOnly ? (
-            <p role="alert" className="text-sm text-red-700">
-              The task cannot contain only whitespace.
+          <div className="space-y-1">
+            <label htmlFor="agent-preset" className="block text-sm font-medium">
+              Preset
+            </label>
+            <select
+              id="agent-preset"
+              data-testid="agent-preset-select"
+              value={selectedPresetId}
+              disabled={runActive || busy !== null}
+              onChange={(event) => {
+                const value = event.target.value;
+                setSelectedPresetId(
+                  isAgentCatalogTaskId(value) ? value : "custom",
+                );
+              }}
+              className="w-full rounded border border-slate-300 p-2 text-sm disabled:bg-slate-100"
+            >
+              <option value="custom">Custom task</option>
+              {AGENT_CATALOG_TASK_PRESETS.map((candidate) => (
+                <option key={candidate.id} value={candidate.id}>
+                  {candidate.label}
+                </option>
+              ))}
+            </select>
+            <p className="text-xs text-slate-500">
+              Predefined tasks use a neutral JSON answer shape. Expected values
+              are checked on the server and are never sent to the model.
             </p>
-          ) : null}
+          </div>
+
+          {preset !== null ? (
+            <div className="space-y-1">
+              <p className="text-sm font-medium">Preset instruction</p>
+              <pre
+                data-testid="agent-preset-instruction"
+                className="overflow-x-auto rounded bg-slate-100 p-3 text-xs text-slate-800"
+              >
+                {presetInstruction}
+              </pre>
+            </div>
+          ) : (
+            <>
+              <label htmlFor="agent-task" className="block text-sm font-medium">
+                Task
+              </label>
+              <textarea
+                id="agent-task"
+                data-testid="agent-task-input"
+                value={task}
+                maxLength={maxTaskChars}
+                rows={5}
+                disabled={runActive || busy !== null}
+                onChange={(event) => setTask(event.target.value)}
+                aria-describedby="agent-task-help"
+                className="w-full rounded border border-slate-300 p-3 text-sm disabled:bg-slate-100"
+                placeholder="Read the main heading on the shop page and return it as JSON."
+              />
+              <p id="agent-task-help" className="text-xs text-slate-500">
+                {task.length} / {maxTaskChars} characters. One bounded task per
+                run; the agent works only on the local app origin.
+              </p>
+              {whitespaceOnly ? (
+                <p role="alert" className="text-sm text-red-700">
+                  The task cannot contain only whitespace.
+                </p>
+              ) : null}
+            </>
+          )}
           <div className="flex flex-wrap items-center gap-3">
             <button
               type="submit"
@@ -233,6 +298,18 @@ export function TaskPanel({
                 {describeTaskResult(displayRun.evaluation).detail}
               </p>
             </div>
+            {overall !== null && shouldShowOverallTaskResult(displayRun) ? (
+              <div
+                className={`space-y-1 rounded border p-3 text-sm ${
+                  TONE_CLASSES[overall.tone]
+                }`}
+              >
+                <p data-testid="agent-run-overall" className="font-semibold">
+                  {overall.label}
+                </p>
+                <p>{overall.detail}</p>
+              </div>
+            ) : null}
             {isActiveTask && displayRun.status === "cancelling" ? (
               <p className="text-sm text-amber-900">
                 Cancellation requested. Waiting for the worker to settle; the
@@ -260,6 +337,14 @@ export function TaskPanel({
               <div>
                 <dt className="font-medium text-slate-500">Model</dt>
                 <dd className="break-all">{displayRun.modelId}</dd>
+              </div>
+              <div>
+                <dt className="font-medium text-slate-500">Preset</dt>
+                <dd data-testid="agent-run-preset">
+                  {displayRun.presetId === null
+                    ? "Custom task"
+                    : getAgentCatalogTaskPreset(displayRun.presetId).label}
+                </dd>
               </div>
               <div>
                 <dt className="font-medium text-slate-500">Started</dt>
@@ -301,6 +386,10 @@ export function TaskPanel({
                 <dt className="font-medium text-slate-500">UI evidence</dt>
                 <dd>
                   {displayRun.uiEvidence === "observed" ? "Observed" : "Unverified"}
+                  <span className="mt-1 block text-xs text-slate-500">
+                    Observed means a successful browser JavaScript tool event
+                    was persisted. It is trace evidence, not cryptographic proof.
+                  </span>
                 </dd>
               </div>
             </dl>

@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   AGENT_RECOVERY_FILE,
+  AGENT_RECOVERY_VERSION,
   loadAgentRecoveryReport,
   recoverInterruptedAgentState,
 } from "../src/server/agent-recovery";
@@ -56,6 +57,7 @@ function runRecord(
     version: 2,
     runId: overrides.runId,
     kind: "task",
+    presetId: null,
     task: "Read the main heading.",
     modelId: "openrouter/openai/gpt-5.6-luna",
     origin: "http://127.0.0.1:3000",
@@ -185,6 +187,100 @@ describe("agent restart recovery", () => {
     expect(
       await storage.readJson<unknown>(PAID_JOB_LOCK_SEGMENTS),
     ).toBeUndefined();
+  });
+
+  it("evaluates a preset task interrupted by restart as failed", async () => {
+    const storage = await makeStorage();
+    const runId = randomUUID();
+    const gonePid = await deadPid();
+    await saveAgentRun(
+      storage,
+      runRecord({
+        runId,
+        presetId: "catalog-cheapest-home",
+        status: "hung",
+        watchdogExpiredAt: new Date().toISOString(),
+        worker: {
+          pid: gonePid,
+          groupId: gonePid,
+          procStartTicks: 1,
+          bootId: await readBootId(),
+        },
+      }),
+    );
+    await writeStaleLock(storage, runId);
+
+    await recoverInterruptedAgentState({
+      storage,
+      ...FAST_GRACES,
+    });
+
+    const run = await loadAgentRun(storage, runId);
+    expect(run).toMatchObject({
+      status: "interrupted",
+      presetId: "catalog-cheapest-home",
+      evaluation: { status: "failed" },
+    });
+    expect(run?.evaluation.reason).toContain("app restarted");
+  });
+
+  it("backfills evaluation for a previously unresolved terminal preset run", async () => {
+    const storage = await makeStorage();
+    const runId = randomUUID();
+    const gonePid = await deadPid();
+    const timestamp = new Date().toISOString();
+    await saveAgentRun(
+      storage,
+      runRecord({
+        runId,
+        presetId: "catalog-cheapest-home",
+        status: "interrupted",
+        error: "The app restarted before the worker group was proven gone.",
+        endedAt: timestamp,
+        worker: {
+          pid: gonePid,
+          groupId: gonePid,
+          procStartTicks: 1,
+          bootId: await readBootId(),
+        },
+      }),
+    );
+    await storage.writeJson([AGENT_RECOVERY_FILE], {
+      version: AGENT_RECOVERY_VERSION,
+      finishedAt: timestamp,
+      status: "reconciled",
+      corruptRuns: 0,
+      runs: [
+        {
+          runId,
+          previousStatus: "interrupted",
+          outcome: "skipped",
+          reason: "unverifiable",
+          signals: [],
+          memberPids: [],
+          remainingPids: [],
+          lock: "held",
+          message: "Manual cleanup is required.",
+        },
+      ],
+    });
+    await writeStaleLock(storage, runId);
+
+    const report = await recoverInterruptedAgentState({
+      storage,
+      ...FAST_GRACES,
+    });
+    expect(report.runs[0]).toMatchObject({
+      runId,
+      outcome: "already-gone",
+      lock: "released",
+    });
+    const run = await loadAgentRun(storage, runId);
+    expect(run).toMatchObject({
+      status: "interrupted",
+      presetId: "catalog-cheapest-home",
+      evaluation: { status: "failed" },
+    });
   });
 
   it("terminates a live orphan group before releasing the lock", async () => {

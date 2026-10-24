@@ -101,9 +101,100 @@ export function describeTaskResult(
         label: "Not evaluated",
         tone: "neutral",
         detail:
-          "Custom tasks are not automatically passed. Execution status is reported separately from task success.",
+          "Runs without a deterministic evaluation are not automatically passed. Execution status is reported separately from task success.",
       };
   }
+}
+
+export interface OverallTaskResult extends RunLabel {
+  readonly detail: string;
+  /** True only for a completed execution, a passed result, and observed UI. */
+  readonly fullPass: boolean;
+}
+
+/** The overall block is only meaningful for a predefined catalog task. */
+export function shouldShowOverallTaskResult(
+  run: Pick<AgentRunRecord, "kind" | "presetId">,
+): boolean {
+  return run.kind === "task" && run.presetId !== null;
+}
+
+/**
+ * Overall outcome for a predefined task. A matching business answer is not a
+ * full pass unless the execution completed and a browser tool event was
+ * observed; custom tasks remain not evaluated.
+ */
+export function describeOverallTaskResult(
+  run: Pick<
+    AgentRunRecord,
+    "kind" | "presetId" | "status" | "stopReason" | "evaluation" | "uiEvidence"
+  >,
+): OverallTaskResult {
+  if (!shouldShowOverallTaskResult(run)) {
+    return {
+      label: "Not evaluated",
+      tone: "neutral",
+      detail:
+        "No deterministic evaluation is available. Execution status and UI evidence are reported separately.",
+      fullPass: false,
+    };
+  }
+  if (run.evaluation.status === "not_evaluated") {
+    if (
+      run.status === "running" ||
+      run.status === "cancelling" ||
+      run.status === "hung"
+    ) {
+      return {
+        label: "Evaluation pending",
+        tone: "neutral",
+        detail:
+          "The deterministic evaluator runs once the execution settles.",
+        fullPass: false,
+      };
+    }
+    return {
+      label: "Not evaluated",
+      tone: "neutral",
+      detail:
+        "No deterministic evaluation is available. Execution status and UI evidence are reported separately.",
+      fullPass: false,
+    };
+  }
+  if (run.evaluation.status === "failed") {
+    return {
+      label: "Task failed",
+      tone: "danger",
+      detail:
+        run.evaluation.reason ?? "The independent evaluator failed this task.",
+      fullPass: false,
+    };
+  }
+  if (run.status !== "completed" || run.stopReason !== "completed") {
+    return {
+      label: "Business result passed; execution not completed",
+      tone: "warning",
+      detail:
+        "The answer matched, but the run did not complete cleanly. This is not a full pass.",
+      fullPass: false,
+    };
+  }
+  if (run.uiEvidence !== "observed") {
+    return {
+      label: "Business result passed; UI unverified",
+      tone: "warning",
+      detail:
+        "The answer matched, but no successful browser JavaScript tool event was observed. This is not a full pass.",
+      fullPass: false,
+    };
+  }
+  return {
+    label: "Full task pass",
+    tone: "success",
+    detail:
+      "The execution completed, the business result matched, and a successful browser JavaScript tool event was observed.",
+    fullPass: true,
+  };
 }
 
 export function formatEstimatedCost(

@@ -9,6 +9,7 @@ import {
   type AgentStatusLike,
 } from "@/lib/agent-dashboard-view";
 import type { AgentRunLimits } from "@/lib/agent-ipc";
+import type { AgentTaskStartRequest } from "@/lib/agent-tasks";
 import {
   AGENT_STREAM_VERSION,
   AGENT_TRACE_VERSION,
@@ -468,7 +469,7 @@ export function AgentDashboard({
     }
   }
 
-  async function startTask(task: string): Promise<boolean> {
+  async function startTask(request: AgentTaskStartRequest): Promise<boolean> {
     if (requestInFlight.current || busy !== null || runActive) return false;
     requestInFlight.current = true;
     setBusy("task");
@@ -478,7 +479,10 @@ export function AgentDashboard({
     try {
       const response = await guardedJsonFetch("/api/agent/runs", {
         method: "POST",
-        body: { task },
+        body:
+          "presetId" in request
+            ? { presetId: request.presetId }
+            : { task: request.task },
       });
       if (!response.ok) {
         const failure = await readMutationFailure(response);
@@ -508,7 +512,10 @@ export function AgentDashboard({
       setFeedback({
         scope: "task",
         tone: "status",
-        text: "Task run started. The supervisor is launching the local browser.",
+        text:
+          "presetId" in request
+            ? "Preset task run started. The supervisor is launching the local browser."
+            : "Task run started. The supervisor is launching the local browser.",
       });
       if (viewRef.current.activeRunId === runId) {
         pollRunIdRef.current = runId;

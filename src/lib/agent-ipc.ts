@@ -140,6 +140,27 @@ export type AgentWorkerEventMessage = z.infer<
   typeof agentWorkerEventMessageSchema
 >;
 
+/**
+ * The SDK's browser JavaScript tool. Only a successful end of this tool counts
+ * as observed UI activity; delivery tools such as `finish` are not UI use.
+ *
+ * The SDK exposes tool events, not individual page-action events. A successful
+ * `javascript` cell is the strongest browser-trace signal available here: it is
+ * useful evidence that a browser tool ran, not cryptographic proof that the
+ * cell touched a page primitive or the shop UI.
+ */
+export const AGENT_BROWSER_TOOL_NAME = "javascript" as const;
+
+export function isObservedBrowserToolEvent(
+  event: AgentWorkerEventMessage,
+): boolean {
+  return (
+    event.kind === "tool_end" &&
+    event.isError === false &&
+    event.toolName === AGENT_BROWSER_TOOL_NAME
+  );
+}
+
 export const agentWorkerUsageSchema = z.strictObject({
   inputTokens: z.number().int().nonnegative().nullable(),
   outputTokens: z.number().int().nonnegative().nullable(),

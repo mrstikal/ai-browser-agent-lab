@@ -164,6 +164,7 @@ function makeRecord(overrides: Partial<AgentRunRecord> = {}): AgentRunRecord {
     version: AGENT_RUN_VERSION,
     runId: "11111111-1111-4111-8111-111111111111",
     kind: "verification",
+    presetId: null,
     task: "Read the Shop heading.",
     modelId: DEFAULT_BROWSER_MODEL_ID,
     origin: "http://127.0.0.1:3000",

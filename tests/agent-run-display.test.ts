@@ -5,11 +5,13 @@ import { pickAgentDashboardView } from "@/lib/agent-dashboard-view";
 import {
   describeExecutionStatus,
   describeGateBlocker,
+  describeOverallTaskResult,
   describeStopReason,
   describeTaskResult,
   formatDuration,
   formatEstimatedCost,
   formatTokens,
+  shouldShowOverallTaskResult,
 } from "@/lib/agent-run-display";
 
 function makeRun(overrides: Partial<AgentRunRecord> = {}): AgentRunRecord {
@@ -17,6 +19,7 @@ function makeRun(overrides: Partial<AgentRunRecord> = {}): AgentRunRecord {
     version: 2,
     runId: "11111111-1111-4111-8111-111111111111",
     kind: "task",
+    presetId: null,
     task: "Read the main heading.",
     modelId: "openrouter/openai/gpt-5.6-luna",
     origin: "http://127.0.0.1:3000",
@@ -199,6 +202,120 @@ describe("agent run display", () => {
         makeGate({ verified: false, reason: "sdk-unavailable" }),
       ),
     ).toMatchObject({ title: "Browser SDK unavailable" });
+  });
+});
+
+describe("overall task result", () => {
+  it("requires execution, business, and UI evidence for a full pass", () => {
+    const run = makeRun({
+      presetId: "catalog-cheapest-home",
+      evaluation: { status: "passed", reason: "Matched." },
+      uiEvidence: "observed",
+    });
+    expect(describeOverallTaskResult(run)).toMatchObject({
+      label: "Full task pass",
+      tone: "success",
+      fullPass: true,
+    });
+  });
+
+  it("does not claim a full pass without observed UI evidence", () => {
+    const run = makeRun({
+      presetId: "catalog-cheapest-home",
+      evaluation: { status: "passed", reason: "Matched." },
+      uiEvidence: "unverified",
+    });
+    expect(describeOverallTaskResult(run)).toMatchObject({
+      label: "Business result passed; UI unverified",
+      tone: "warning",
+      fullPass: false,
+    });
+  });
+
+  it("does not claim a full pass for an incomplete execution", () => {
+    const run = makeRun({
+      presetId: "catalog-cheapest-home",
+      status: "failed",
+      stopReason: null,
+      evaluation: { status: "passed", reason: "Matched." },
+      uiEvidence: "observed",
+    });
+    expect(describeOverallTaskResult(run)).toMatchObject({
+      label: "Business result passed; execution not completed",
+      tone: "warning",
+      fullPass: false,
+    });
+  });
+
+  it("keeps failed and custom tasks separate from full success", () => {
+    expect(
+      describeOverallTaskResult(
+        makeRun({
+          presetId: "catalog-cheapest-home",
+          evaluation: { status: "failed", reason: "Wrong product." },
+        }),
+      ),
+    ).toMatchObject({
+      label: "Task failed",
+      tone: "danger",
+      fullPass: false,
+    });
+    expect(
+      describeOverallTaskResult(
+        makeRun({ evaluation: { status: "not_evaluated", reason: null } }),
+      ),
+    ).toMatchObject({
+      label: "Not evaluated",
+      tone: "neutral",
+      fullPass: false,
+    });
+  });
+
+  it("shows a pending evaluation while a preset run is active", () => {
+    expect(
+      describeOverallTaskResult(
+        makeRun({
+          presetId: "catalog-cheapest-home",
+          status: "running",
+          stopReason: null,
+          evaluation: { status: "not_evaluated", reason: null },
+          uiEvidence: "unverified",
+        }),
+      ),
+    ).toMatchObject({
+      label: "Evaluation pending",
+      tone: "neutral",
+      fullPass: false,
+    });
+  });
+
+  it("shows the overall block only for preset task runs", () => {
+    expect(
+      shouldShowOverallTaskResult(
+        makeRun({ presetId: "catalog-cheapest-home" }),
+      ),
+    ).toBe(true);
+    expect(shouldShowOverallTaskResult(makeRun({ presetId: null }))).toBe(false);
+    expect(
+      shouldShowOverallTaskResult(
+        makeRun({ kind: "verification", presetId: null }),
+      ),
+    ).toBe(false);
+  });
+
+  it("never describes a custom or verification run as a task result", () => {
+    const passed = {
+      evaluation: { status: "passed" as const, reason: "Matched." },
+      uiEvidence: "observed" as const,
+    };
+    expect(
+      describeOverallTaskResult(makeRun({ ...passed, presetId: null })),
+    ).toMatchObject({ label: "Not evaluated", fullPass: false });
+    expect(
+      describeOverallTaskResult(
+        makeRun({ ...passed, kind: "verification", presetId: null }),
+      ),
+    ).toMatchObject({ label: "Not evaluated", fullPass: false });
   });
 });
 

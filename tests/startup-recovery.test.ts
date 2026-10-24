@@ -38,6 +38,7 @@ function orphanRun(
     version: 2,
     runId,
     kind: "task",
+    presetId: null,
     task: "Read the main heading.",
     modelId: "openrouter/openai/gpt-5.6-luna",
     origin: "http://127.0.0.1:3000",

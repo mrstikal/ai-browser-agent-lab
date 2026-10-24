@@ -3,8 +3,10 @@ import {
   AGENT_WORKER_MAX_TASK_CHARS,
   agentRunLimitsSchema,
 } from "@/lib/agent-ipc";
+import { agentCatalogTaskIdSchema } from "@/lib/agent-tasks";
 import { AgentCompatibilityError } from "@/server/agent-compatibility";
 import { startAgentRun } from "@/server/agent-manager";
+import { startCatalogTaskRun } from "@/server/agent-task-evaluator";
 import { AgentRunCorruptionError } from "@/server/agent-runs";
 import { CredentialError } from "@/server/credentials";
 import { ModelSettingsCorruptionError } from "@/server/model-settings";
@@ -14,10 +16,19 @@ import { StorageCorruptionError } from "@/server/storage";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-const startSchema = z.strictObject({
-  task: z.string().trim().min(1).max(AGENT_WORKER_MAX_TASK_CHARS),
-  limits: agentRunLimitsSchema.partial().optional(),
-});
+const limitsSchema = agentRunLimitsSchema.partial().optional();
+
+/** Exactly one of `task` (custom) or `presetId` (catalog Task 1-3). */
+const startSchema = z.union([
+  z.strictObject({
+    task: z.string().trim().min(1).max(AGENT_WORKER_MAX_TASK_CHARS),
+    limits: limitsSchema,
+  }),
+  z.strictObject({
+    presetId: agentCatalogTaskIdSchema,
+    limits: limitsSchema,
+  }),
+]);
 
 function failure(
   status: number,
@@ -37,11 +48,17 @@ export async function POST(request: Request) {
 
   let result;
   try {
-    result = await startAgentRun({
-      kind: "task",
-      task: guarded.data.task,
-      limits: guarded.data.limits,
-    });
+    result =
+      "presetId" in guarded.data
+        ? await startCatalogTaskRun({
+            presetId: guarded.data.presetId,
+            limits: guarded.data.limits,
+          })
+        : await startAgentRun({
+            kind: "task",
+            task: guarded.data.task,
+            limits: guarded.data.limits,
+          });
   } catch (error) {
     if (error instanceof CredentialError) {
       return failure(

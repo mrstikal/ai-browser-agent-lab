@@ -8,7 +8,9 @@ import {
   agentCancelMessageSchema,
   agentParentMessageSchema,
   agentStartMessageSchema,
+  agentWorkerEventMessageSchema,
   agentWorkerMessageSchema,
+  isObservedBrowserToolEvent,
 } from "../src/lib/agent-ipc";
 
 const runId = "6f6a1f9e-6a4e-4f3f-9d1a-2b3c4d5e6f70";
@@ -247,5 +249,53 @@ describe("worker messages", () => {
   it("bounds the worker event stream", () => {
     expect(AGENT_WORKER_MAX_EVENTS).toBeGreaterThan(0);
     expect(AGENT_WORKER_MAX_EVENTS).toBeLessThanOrEqual(10_000);
+  });
+});
+
+describe("browser UI evidence", () => {
+  const base = {
+    type: "event",
+    runId,
+    seq: 1,
+    at: "2026-10-24T10:00:00.000Z",
+  };
+
+  it("counts only successful browser JavaScript tool ends", () => {
+    const parse = (value: Record<string, unknown>) =>
+      agentWorkerEventMessageSchema.parse({ ...base, ...value });
+
+    expect(
+      isObservedBrowserToolEvent(
+        parse({ kind: "tool_end", toolName: "javascript", isError: false }),
+      ),
+    ).toBe(true);
+    expect(
+      isObservedBrowserToolEvent(
+        parse({ kind: "tool_end", toolName: "javascript", isError: true }),
+      ),
+    ).toBe(false);
+    expect(
+      isObservedBrowserToolEvent(
+        parse({ kind: "tool_end", toolName: "javascript" }),
+      ),
+    ).toBe(false);
+    expect(
+      isObservedBrowserToolEvent(
+        parse({ kind: "tool_start", toolName: "javascript" }),
+      ),
+    ).toBe(false);
+    expect(
+      isObservedBrowserToolEvent(
+        parse({ kind: "tool_end", toolName: "finish", isError: false }),
+      ),
+    ).toBe(false);
+    expect(
+      isObservedBrowserToolEvent(
+        parse({ kind: "tool_end", toolName: "finish_from_js", isError: false }),
+      ),
+    ).toBe(false);
+    expect(
+      isObservedBrowserToolEvent(parse({ kind: "tool_end", isError: false })),
+    ).toBe(false);
   });
 });

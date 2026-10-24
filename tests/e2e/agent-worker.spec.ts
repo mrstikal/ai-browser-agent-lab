@@ -6,7 +6,7 @@ import { join } from "node:path";
  * Runs first (sorted by file name) because the shared dev server loads the
  * session key lazily: seeding `data/secrets/openrouter-key` before any
  * key-reading request lets this spec prove the browser-based verification and
- * the supervisor strategy next to a real Next.js dev server. The second test
+ * the supervisor strategy next to a real Next.js dev server. The final test
  * deletes the key again through the guarded route so later setup tests see a
  * fresh state.
  */
@@ -178,6 +178,7 @@ test("dashboard task controls start a run without claiming task success", async 
   await expect(page.getByTestId("agent-run-output")).toContainText(
     '{"heading":"Shop"}',
   );
+  await expect(page.getByTestId("agent-run-overall")).toHaveCount(0);
   await expect(runButton).toBeEnabled({ timeout: 15_000 });
 
   await expect(page.getByTestId("agent-trace-connection")).toHaveText("Live", {
@@ -314,6 +315,41 @@ test("dashboard refuses a duplicate run and renders cancellation", async ({
   expect(await page.content()).not.toContain(TEST_KEY);
 });
 
+test("preset catalog task passes with observed UI evidence", async ({
+  page,
+  baseURL,
+}) => {
+  if (!baseURL) throw new Error("The E2E base URL is missing.");
+  const dataDir = process.env.DATA_DIR;
+  if (!dataDir) throw new Error("The E2E DATA_DIR is missing.");
+  await seedKeyFile(dataDir);
+  await writeCompatibilityStamp(dataDir, baseURL);
+
+  await page.goto("/agent");
+  await page
+    .getByTestId("agent-preset-select")
+    .selectOption("catalog-cheapest-home");
+  await expect(page.getByTestId("agent-preset-instruction")).toContainText(
+    "cheapest currently available product in the Home category",
+  );
+  await page.getByTestId("agent-run-task").click();
+
+  await expect(page.getByTestId("agent-run-execution")).toHaveText(
+    "Execution completed",
+    { timeout: 30_000 },
+  );
+  await expect(page.getByTestId("agent-run-task-result")).toContainText(
+    "Task passed",
+  );
+  await expect(page.getByTestId("agent-run-overall")).toHaveText(
+    "Full task pass",
+  );
+  await expect(page.getByTestId("agent-run-preset")).toContainText("Task 1");
+  await expect(page.getByTestId("agent-run-output")).toContainText(
+    '"Pebble Plant Pot"',
+  );
+});
+
 test("a mocked supervised run works beside the dev server", async ({
   request,
   baseURL,
@@ -436,7 +472,7 @@ test("a mocked supervised run works beside the dev server", async ({
       steps: 3,
       outputText: '{"heading":"Shop"}',
       evaluation: { status: "not_evaluated" },
-      uiEvidence: "unverified",
+      uiEvidence: "observed",
     });
     expect(afterBody.activeRunId).toBeNull();
     expect(JSON.stringify(afterBody)).not.toContain(TEST_KEY);

@@ -15,6 +15,7 @@ import {
   type AgentRunLifecycle,
   type AgentRunRecord,
 } from "./agent-runs";
+import { evaluateCatalogTaskRun } from "./agent-task-evaluation";
 import { acquireLock, LockError, LockHeldError, readLockMetadata } from "./lock";
 import { AGENT_RUN_LOCK_KIND, PAID_JOB_LOCK_SEGMENTS } from "./paid-lock";
 import type { ProcOptions } from "./process-identity";
@@ -306,6 +307,15 @@ export async function recoverInterruptedAgentState(
       endedAt,
       updatedAt: endedAt,
     };
+    // A preset task that terminates through restart recovery still gets its
+    // one deterministic business evaluation; it can never be a pass.
+    if (
+      updated.kind === "task" &&
+      updated.presetId !== null &&
+      updated.evaluation.status === "not_evaluated"
+    ) {
+      updated.evaluation = evaluateCatalogTaskRun(updated);
+    }
     await saveAgentRun(storage, updated);
     runs.push(toReport(run, termination, lock, message));
   }
@@ -338,13 +348,24 @@ export async function recoverInterruptedAgentState(
       termination.status === "already-gone"
     ) {
       const endedAt = now().toISOString();
-      await saveAgentRun(storage, {
+      const updated: AgentRunRecord = {
         ...run,
         error: boundedMessage(
           `${run.error ?? "The run was interrupted."} Manual cleanup is no longer needed; the worker process group is gone.`,
         ),
         updatedAt: endedAt,
-      });
+      };
+      // Backfill a preset task that became terminal in an earlier build whose
+      // recovery path did not yet evaluate it. The once-only check preserves
+      // any existing evaluation.
+      if (
+        updated.kind === "task" &&
+        updated.presetId !== null &&
+        updated.evaluation.status === "not_evaluated"
+      ) {
+        updated.evaluation = evaluateCatalogTaskRun(updated);
+      }
+      await saveAgentRun(storage, updated);
     }
     runs.push({
       ...toReport(run, termination, lock, message),

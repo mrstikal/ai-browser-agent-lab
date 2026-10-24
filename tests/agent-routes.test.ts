@@ -574,6 +574,57 @@ describe("agent verification API route", () => {
   );
 
   it(
+    "starts a preset catalog task and persists its evaluation",
+    { timeout: 45_000 },
+    async () => {
+      await seedKeyAndStamp();
+      const response = await runsRoute.POST(
+        makeRequest("/api/agent/runs", { presetId: "catalog-out-of-stock" }),
+      );
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { run: AgentRunRecord };
+      expect(body.run).toMatchObject({
+        kind: "task",
+        presetId: "catalog-out-of-stock",
+        status: "running",
+        evaluation: { status: "not_evaluated", reason: null },
+      });
+      expect(body.run.task).toContain(`${origin}/shop`);
+
+      const finished = await waitForRun(body.run.runId);
+      expect(finished).toMatchObject({
+        status: "completed",
+        stopReason: "completed",
+        presetId: "catalog-out-of-stock",
+        evaluation: { status: "passed" },
+        uiEvidence: "observed",
+      });
+      expect(finished.outputText).toContain("Atlas Travel Backpack");
+    },
+  );
+
+  it("refuses a start body with both a task and a preset", async () => {
+    const response = await runsRoute.POST(
+      makeRequest("/api/agent/runs", {
+        task: "Read the heading.",
+        presetId: "catalog-cheapest-home",
+      }),
+    );
+    expect(response.status).toBe(422);
+    const body = (await response.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("invalid-body");
+
+    const unknownPreset = await runsRoute.POST(
+      makeRequest("/api/agent/runs", { presetId: "catalog-unknown" }),
+    );
+    expect(unknownPreset.status).toBe(422);
+    const unknownBody = (await unknownPreset.json()) as {
+      error: { code: string };
+    };
+    expect(unknownBody.error.code).toBe("invalid-body");
+  });
+
+  it(
     "leaves the model unverified when the heading answer does not match",
     { timeout: 45_000 },
     async () => {

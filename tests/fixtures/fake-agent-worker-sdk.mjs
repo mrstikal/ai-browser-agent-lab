@@ -18,6 +18,67 @@ function mark(name, data) {
   writeFileSync(join(markersDir, name), JSON.stringify(data ?? null));
 }
 
+function catalogAnswerFor(task) {
+  if (typeof task !== "string") return null;
+  if (task.includes("cheapest currently available product in the Home category")) {
+    return {
+      name: "Pebble Plant Pot",
+      priceUsd: 22,
+      url: "/shop/products/pebble-plant-pot",
+    };
+  }
+  if (task.includes("names of all out-of-stock products")) {
+    return {
+      names: [
+        "Atlas Travel Backpack",
+        "Pulse Sport Earbuds",
+        "Glow Aroma Diffuser",
+        "Aero Laptop Stand",
+      ],
+      count: 4,
+    };
+  }
+  if (task.includes("in-stock Audio product priced below $70")) {
+    return {
+      items: [
+        { name: "Mini Bluetooth Radio", priceUsd: 44 },
+        { name: "Echo Mini Speaker", priceUsd: 59 },
+      ],
+    };
+  }
+  return null;
+}
+
+function emitStandardEvents(options, task) {
+  options.onEvent?.({ type: "agent_start" });
+  const toolName =
+    typeof task === "string" && task.includes("[[xss]]")
+      ? '<img src=x onerror="alert(1)">'
+      : "javascript";
+  options.onEvent?.({
+    type: "tool_execution_start",
+    toolCallId: "call-1",
+    toolName,
+    args: {},
+  });
+  options.onEvent?.({
+    type: "tool_execution_end",
+    toolCallId: "call-1",
+    toolName,
+    isError: false,
+    result: {
+      content: [
+        { type: "text", text: "Read the heading." },
+        ...(mode === "vision"
+          ? [{ type: "image", data: "", mimeType: "image/png" }]
+          : []),
+      ],
+    },
+  });
+  options.onEvent?.({ type: "turn_end", message: {}, toolResults: [] });
+  options.onEvent?.({ type: "agent_end", messages: [] });
+}
+
 const usage = {
   input: 10,
   output: 5,
@@ -164,6 +225,54 @@ const agent = {
         setTimeout(resolve, Number.isFinite(delay) ? delay : 300),
       );
     }
+
+    const catalogAnswer = catalogAnswerFor(task);
+    if (catalogAnswer) {
+      if (mode === "catalog-no-events") {
+        return {
+          status: "completed",
+          output: catalogAnswer,
+          text: JSON.stringify(catalogAnswer),
+          steps: 3,
+          durationMs: 25,
+          usage,
+          workspace: "",
+        };
+      }
+      emitStandardEvents(options, task);
+      if (mode === "catalog-ambiguous") {
+        return {
+          status: "completed",
+          output: null,
+          text: "The cheapest Home product is the Pebble Plant Pot.",
+          steps: 3,
+          durationMs: 25,
+          usage,
+          workspace: "",
+        };
+      }
+      if (mode === "catalog-invalid") {
+        return {
+          status: "completed",
+          output: { names: ["Atlas Travel Backpack"], count: 1 },
+          text: '{"names":["Atlas Travel Backpack"],"count":1}',
+          steps: 3,
+          durationMs: 25,
+          usage,
+          workspace: "",
+        };
+      }
+      return {
+        status: "completed",
+        output: catalogAnswer,
+        text: JSON.stringify(catalogAnswer),
+        steps: 3,
+        durationMs: 25,
+        usage,
+        workspace: "",
+      };
+    }
+
     if (mode === "blocked") {
       // Blocks the worker event loop (and therefore its heartbeats and cancel
       // handling) without burning CPU; only an OS signal can stop it.
@@ -219,33 +328,7 @@ const agent = {
       });
     }
 
-    options.onEvent?.({ type: "agent_start" });
-    const toolName =
-      typeof task === "string" && task.includes("[[xss]]")
-        ? '<img src=x onerror="alert(1)">'
-        : "javascript";
-    options.onEvent?.({
-      type: "tool_execution_start",
-      toolCallId: "call-1",
-      toolName,
-      args: {},
-    });
-    options.onEvent?.({
-      type: "tool_execution_end",
-      toolCallId: "call-1",
-      toolName,
-      isError: false,
-      result: {
-        content: [
-          { type: "text", text: "Read the heading." },
-          ...(mode === "vision"
-            ? [{ type: "image", data: "", mimeType: "image/png" }]
-            : []),
-        ],
-      },
-    });
-    options.onEvent?.({ type: "turn_end", message: {}, toolResults: [] });
-    options.onEvent?.({ type: "agent_end", messages: [] });
+    emitStandardEvents(options, task);
     return {
       status: "completed",
       output: headingAnswer.output,
