@@ -2,7 +2,7 @@ import {
   supportSubmissionSchema,
   type SupportSubmissionInput,
 } from "../lib/schemas";
-import { Storage } from "./storage";
+import { Storage, StorageExistsError } from "./storage";
 
 export const SUPPORT_SUBMISSIONS_SEGMENTS = [
   "submissions",
@@ -22,11 +22,34 @@ export interface SaveSupportSubmissionResult {
   readonly filename: string;
 }
 
+export type SupportSubmissionErrorCode = "invalid" | "conflict" | "storage";
+
 export class SupportSubmissionError extends Error {
-  constructor(message: string, options?: ErrorOptions) {
+  readonly code: SupportSubmissionErrorCode;
+
+  constructor(
+    message: string,
+    code: SupportSubmissionErrorCode = "invalid",
+    options?: ErrorOptions,
+  ) {
     super(message, options);
     this.name = "SupportSubmissionError";
+    this.code = code;
   }
+}
+
+function sameSupportInput(
+  record: SupportSubmissionRecord,
+  input: SupportSubmissionInput,
+): boolean {
+  return (
+    record.fullName === input.fullName &&
+    record.email === input.email &&
+    record.subject === input.subject &&
+    record.priority === input.priority &&
+    record.description === input.description &&
+    record.confirmLocalTest === input.confirmLocalTest
+  );
 }
 
 function submissionSegments(id: string): readonly string[] {
@@ -47,6 +70,7 @@ export async function saveSupportSubmission(
   if (!parsed.success) {
     throw new SupportSubmissionError(
       "The support submission does not match the expected schema.",
+      "invalid",
       { cause: parsed.error },
     );
   }
@@ -54,6 +78,12 @@ export async function saveSupportSubmission(
   const id = parsed.data.requestId;
   const existing = await loadSupportSubmission(storage, id);
   if (existing) {
+    if (!sameSupportInput(existing, parsed.data)) {
+      throw new SupportSubmissionError(
+        "This request ID was already used with different values.",
+        "conflict",
+      );
+    }
     return { id, createdAt: existing.createdAt, filename: `${id}.json` };
   }
   const createdAt = now.toISOString();
@@ -65,13 +95,25 @@ export async function saveSupportSubmission(
   };
 
   try {
-    await storage.writeFile(
+    await storage.writeFileExclusive(
       submissionSegments(id),
       `${JSON.stringify(record, null, 2)}\n`,
     );
   } catch (error) {
+    if (error instanceof StorageExistsError) {
+      const raced = await loadSupportSubmission(storage, id);
+      if (raced && sameSupportInput(raced, parsed.data)) {
+        return { id, createdAt: raced.createdAt, filename: `${id}.json` };
+      }
+      throw new SupportSubmissionError(
+        "This request ID was already used with different values.",
+        "conflict",
+        { cause: error },
+      );
+    }
     throw new SupportSubmissionError(
       "The support submission could not be stored.",
+      "storage",
       { cause: error },
     );
   }

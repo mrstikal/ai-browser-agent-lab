@@ -1,6 +1,9 @@
 import { supportSubmissionSchema } from "@/lib/schemas";
 import { readGuardedMutation } from "@/server/mutation-guard";
-import { saveSupportSubmission } from "@/server/support-form";
+import {
+  saveSupportSubmission,
+  SupportSubmissionError,
+} from "@/server/support-form";
 import { createStorage } from "@/server/storage";
 
 export const dynamic = "force-dynamic";
@@ -18,7 +21,23 @@ export async function POST(request: Request): Promise<Response> {
       { ok: true, requestId: saved.id, createdAt: saved.createdAt },
       { status: 201, headers: { "cache-control": "no-store" } },
     );
-  } catch {
+  } catch (error) {
+    if (error instanceof SupportSubmissionError && error.code === "conflict") {
+      return Response.json(
+        {
+          error: {
+            code: "idempotency-conflict",
+            message: "This request ID was already used with different values.",
+          },
+        },
+        { status: 409, headers: { "cache-control": "no-store" } },
+      );
+    }
+    console.error(
+      `[ai-browser-agent-lab] support submission failed: ${
+        error instanceof Error ? error.message : "unknown error"
+      }`,
+    );
     return Response.json(
       {
         error: {

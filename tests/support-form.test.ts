@@ -111,6 +111,20 @@ describe("support submission persistence", () => {
     );
   });
 
+  it("rejects a reused request ID with different values", async () => {
+    const storage = await makeStorage();
+    await saveSupportSubmission(storage, validInput);
+    await expect(
+      saveSupportSubmission(storage, {
+        ...validInput,
+        subject: "A different subject",
+      }),
+    ).rejects.toMatchObject({ code: "conflict" });
+    expect(await loadSupportSubmission(storage, validInput.requestId)).toMatchObject({
+      subject: validInput.subject,
+    });
+  });
+
   it("persists nothing for invalid or unconfirmed input", async () => {
     const storage = await makeStorage();
     await expect(

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { products } from "./products";
 
 export const IMAGE_RESOLUTION_TIERS = ["512", "768", "1K", "1.5K", "2K", "4K"] as const;
 export const IMAGE_OUTPUT_FORMATS = ["png", "jpeg", "webp"] as const;
@@ -47,10 +48,12 @@ export const modelSettingsSchema = z.strictObject({
 
 export const SUPPORT_PRIORITIES = ["Low", "Normal", "High"] as const;
 
+const emailSchema = z.string().trim().max(200).pipe(z.email());
+
 export const supportSubmissionSchema = z.strictObject({
   requestId: z.uuid(),
   fullName: z.string().trim().min(2).max(120),
-  email: z.email().trim().max(200),
+  email: emailSchema,
   subject: z.string().trim().min(3).max(160),
   priority: z.enum(SUPPORT_PRIORITIES),
   description: z.string().trim().min(10).max(4000),
@@ -58,6 +61,28 @@ export const supportSubmissionSchema = z.strictObject({
 });
 
 export type SupportSubmissionInput = z.infer<typeof supportSubmissionSchema>;
+
+export const INQUIRY_TYPES = [
+  "Availability",
+  "Specifications",
+  "Other",
+] as const;
+
+const productIdValues = products.map((product) => product.id) as [
+  string,
+  ...string[],
+];
+
+export const inquirySubmissionSchema = z.strictObject({
+  requestId: z.uuid(),
+  fullName: z.string().trim().min(2).max(120),
+  email: emailSchema,
+  productId: z.enum(productIdValues),
+  inquiryType: z.enum(INQUIRY_TYPES),
+  message: z.string().trim().min(10).max(4000),
+});
+
+export type InquirySubmissionInput = z.infer<typeof inquirySubmissionSchema>;
 
 export type ImageModelSelection = z.infer<typeof imageModelSettingsSchema>;
 export type BrowserModelSelection = z.infer<typeof browserModelSettingsSchema>;
