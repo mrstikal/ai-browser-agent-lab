@@ -5,6 +5,7 @@ import { pathToFileURL } from "node:url";
 import type { AgentEvent, BrowserUse, RunResult } from "@browser_use/pi";
 import { containsImageContent, redactText } from "../lib/agent-output";
 import {
+  AGENT_WORKER_HEARTBEAT_MS,
   AGENT_WORKER_MAX_ERROR_CHARS,
   AGENT_WORKER_MAX_EVENTS,
   AGENT_WORKER_MAX_OUTPUT_CHARS,
@@ -140,6 +141,7 @@ async function runWorker(): Promise<number> {
     runId: null as string | null,
     cancelled: false,
     parentDisconnected: false,
+    heartbeatTimer: null as NodeJS.Timeout | null,
     protocolViolation: false,
     sequence: 0,
     eventsEmitted: 0,
@@ -424,6 +426,20 @@ async function runWorker(): Promise<number> {
         );
       }
 
+      // Liveness heartbeats keep the supervisor's bounded watchdog honest
+      // even when the SDK never returns a result.
+      const heartbeatMs = message.heartbeatMs ?? AGENT_WORKER_HEARTBEAT_MS;
+      const sendHeartbeat = (): void => {
+        send({
+          type: "heartbeat",
+          runId: message.runId,
+          at: new Date().toISOString(),
+        });
+      };
+      sendHeartbeat();
+      state.heartbeatTimer = setInterval(sendHeartbeat, heartbeatMs);
+      state.heartbeatTimer.unref?.();
+
       const outcome = await runTask(agent, message, controller.signal);
       if (state.protocolViolation) {
         return await finishWithError(
@@ -443,6 +459,10 @@ async function runWorker(): Promise<number> {
       }
       return 0;
     } finally {
+      if (state.heartbeatTimer) {
+        clearInterval(state.heartbeatTimer);
+        state.heartbeatTimer = null;
+      }
       if (state.agent) {
         try {
           await state.agent.close();
@@ -472,8 +492,19 @@ async function runWorker(): Promise<number> {
   // A lost parent is treated as a cancellation: abort the SDK run, close the
   // browser, and exit. Forced cleanup of a worker that ignores the abort is
   // the supervisor's job after its watchdog grace period.
+  // The IPC channel can emit EPIPE / ERR_IPC_CHANNEL_CLOSED asynchronously
+  // when the parent disappears between a liveness check and a write. The
+  // disconnect handler and the delivery-failure path own that state.
+  process.on("error", (error: unknown) => {
+    logError(`The agent IPC channel reported an error: ${messageOf(error)}`, key);
+  });
+
   process.on("disconnect", () => {
     state.parentDisconnected = true;
+    if (state.heartbeatTimer) {
+      clearInterval(state.heartbeatTimer);
+      state.heartbeatTimer = null;
+    }
     if (state.phase === "waiting") {
       logError(
         "The parent process disconnected before the run started; exiting without a run.",

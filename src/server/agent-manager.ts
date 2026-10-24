@@ -1,14 +1,17 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { z } from "zod";
 import {
   AGENT_RUN_DEFAULT_LIMITS,
+  AGENT_WORKER_HEARTBEAT_MS,
   AGENT_WORKER_MAX_ERROR_CHARS,
   AGENT_WORKER_MAX_EVENTS,
   AGENT_WORKER_MAX_TASK_CHARS,
+  AGENT_WORKER_MIN_HEARTBEAT_MS,
+  AGENT_WORKER_MAX_HEARTBEAT_MS,
   agentRunLimitsSchema,
   agentWorkerMessageSchema,
   type AgentRunLimits,
@@ -20,6 +23,14 @@ import {
   AgentCompatibilityError,
   loadAgentCompatibility,
 } from "./agent-compatibility";
+import {
+  terminateAgentWorkerGroup,
+  type AgentGroupTermination,
+} from "./agent-group";
+import {
+  loadAgentRecoveryReport,
+  recordUnresolvedAgentGroup,
+} from "./agent-recovery";
 import {
   AGENT_RUN_VERSION,
   AgentRunError,
@@ -97,11 +108,29 @@ export interface AgentGate {
   readonly vision: "observed" | "unverified";
 }
 
+export const AGENT_STATUS_RECOVERY_LIMIT = 20;
+
+export interface AgentRecoveryStatus {
+  readonly status: "reconciled" | "skipped" | "failed";
+  readonly finishedAt: string;
+  readonly corruptRuns: number;
+  readonly unresolvedCount: number;
+  readonly unresolved: ReadonlyArray<{
+    readonly runId: string;
+    readonly outcome: "skipped" | "escaped";
+    readonly reason: string | null;
+    readonly lock: string;
+    readonly message: string;
+  }>;
+}
+
 export interface AgentStatusSnapshot {
   readonly activeRunId: string | null;
   readonly gate: AgentGate;
   readonly runs: readonly AgentRunRecord[];
   readonly corruptRuns: number;
+  /** Last startup-recovery report; null when nothing needed reconciliation. */
+  readonly recovery: AgentRecoveryStatus | null;
 }
 
 export interface AgentWorkerCommand {
@@ -121,6 +150,8 @@ export interface StartAgentRunOptions {
   readonly kind: "verification" | "task";
   readonly task?: string | undefined;
   readonly limits?: AgentRunLimitsInput | undefined;
+  /** Heartbeat interval override (tests/tuning); bounded by the protocol. */
+  readonly heartbeatMs?: number | undefined;
   readonly env?: StorageEnv | undefined;
   readonly storage?: Storage | undefined;
   readonly fetchImpl?: typeof fetch | undefined;
@@ -418,11 +449,32 @@ export async function loadAgentStatus(
     repoRoot: options.repoRoot,
   });
   const listed = await listAgentRuns(storage);
+  const report = await loadAgentRecoveryReport(storage);
+  const unresolved = (report?.runs ?? []).filter(
+    (entry) => entry.outcome === "skipped" || entry.outcome === "escaped",
+  );
   return {
     activeRunId: getActiveAgentRunId(storage.root),
     gate,
     runs: listed.runs,
     corruptRuns: listed.corrupt,
+    recovery: report
+      ? {
+          status: report.status,
+          finishedAt: report.finishedAt,
+          corruptRuns: report.corruptRuns,
+          unresolvedCount: unresolved.length,
+          unresolved: unresolved
+            .slice(0, AGENT_STATUS_RECOVERY_LIMIT)
+            .map((entry) => ({
+              runId: entry.runId,
+              outcome: entry.outcome as "skipped" | "escaped",
+              reason: entry.reason,
+              lock: entry.lock,
+              message: entry.message,
+            })),
+        }
+      : null,
   };
 }
 
@@ -492,6 +544,18 @@ export async function startAgentRun(
   const repoRoot = resolve(options.repoRoot ?? process.cwd());
   const fetchImpl = options.fetchImpl ?? fetch;
   const now = options.now ?? (() => new Date());
+
+  if (
+    options.heartbeatMs !== undefined &&
+    (!Number.isInteger(options.heartbeatMs) ||
+      options.heartbeatMs < AGENT_WORKER_MIN_HEARTBEAT_MS ||
+      options.heartbeatMs > AGENT_WORKER_MAX_HEARTBEAT_MS)
+  ) {
+    return {
+      status: "invalid-request",
+      message: `The heartbeat interval must be ${AGENT_WORKER_MIN_HEARTBEAT_MS} to ${AGENT_WORKER_MAX_HEARTBEAT_MS} ms.`,
+    };
+  }
 
   let task: string;
   let limits: AgentRunLimits;
@@ -706,12 +770,35 @@ export async function startAgentRun(
   let eventsUnreadable = false;
   let watchdogTimer: NodeJS.Timeout | undefined;
   let graceTimer: NodeJS.Timeout | undefined;
+  let heartbeatTimer: NodeJS.Timeout | undefined;
+  let lastHeartbeatAtMs = performance.now();
+  let startedSeen = false;
+  const heartbeatMs =
+    options.heartbeatMs ?? AGENT_WORKER_HEARTBEAT_MS;
+  const heartbeatTimeoutMs = Math.max(3 * heartbeatMs, 2_000);
 
   const clearWatchdogs = (): void => {
     if (watchdogTimer !== undefined) clearTimeout(watchdogTimer);
     if (graceTimer !== undefined) clearTimeout(graceTimer);
+    if (heartbeatTimer !== undefined) clearInterval(heartbeatTimer);
     watchdogTimer = undefined;
     graceTimer = undefined;
+    heartbeatTimer = undefined;
+  };
+
+  const startHeartbeatWatch = (): void => {
+    heartbeatTimer = setInterval(() => {
+      if (finished || record.status !== "running") return;
+      // Browser launch happens before `started`; the wall-clock watchdog
+      // (re-anchored on `started`) covers that phase, not the liveness check.
+      if (!startedSeen) return;
+      if (performance.now() - lastHeartbeatAtMs <= heartbeatTimeoutMs) return;
+      console.error(
+        `[agent-supervisor] Agent run ${runId} stopped sending heartbeats; requesting a cooperative cancel.`,
+      );
+      requestCancel("heartbeat");
+    }, heartbeatMs);
+    heartbeatTimer.unref?.();
   };
 
   const enqueue = (write: () => Promise<void>): Promise<void> => {
@@ -737,6 +824,60 @@ export async function startAgentRun(
     });
   };
 
+  const forceTerminateHungRun = async (): Promise<void> => {
+    if (finished) return;
+    const profileDir = storage.path(["browser-profiles", runId]);
+    let termination: AgentGroupTermination;
+    try {
+      termination = await terminateAgentWorkerGroup(record.worker, {
+        profileDir,
+      });
+    } catch (error) {
+      termination = { status: "skipped", reason: "unverifiable", memberPids: [] };
+      console.error(
+        `[agent-supervisor] Forced cleanup of agent run ${runId} could not inspect the process group: ${messageOf(error)}`,
+      );
+    }
+
+    if (
+      termination.status === "terminated" ||
+      termination.status === "already-gone"
+    ) {
+      // The kills skipped the worker's own cleanup, so remove its disposable
+      // profile once the group is proven gone. The child exit handler may
+      // have settled the run meanwhile; the removal still applies.
+      await rm(profileDir, { recursive: true, force: true }).catch((error: unknown) => {
+        console.error(
+          `[agent-supervisor] The disposable browser profile of agent run ${runId} could not be removed: ${messageOf(error)}`,
+        );
+      });
+      if (finished) return;
+      markFailed(
+        termination.status === "terminated"
+          ? `The worker did not answer the cancel; its verified process group was force-terminated (${termination.signals.join(", ")}).`
+          : "The worker did not answer the cancel; its process group was already gone.",
+      );
+      await finish();
+      return;
+    }
+
+    if (finished) return;
+
+    const note =
+      termination.status === "skipped"
+        ? `Forced cleanup could not verify the worker process group (${termination.reason}); a live browser may remain and needs manual cleanup (group members: ${termination.memberPids.join(", ") || "none"}).`
+        : `Forced cleanup left processes behind (${termination.remainingPids.join(", ")}); manual cleanup is required.`;
+    record.error = boundedErrorText(
+      `${record.error ?? "The run is hung."} ${note}`.trim(),
+      key,
+    );
+    record.updatedAt = now().toISOString();
+    persistRecord();
+    console.error(
+      `[agent-supervisor] Agent run ${runId} is hung and could not be force-terminated safely: ${note}`,
+    );
+  };
+
   const armGraceTimer = (): void => {
     if (graceTimer !== undefined) return;
     graceTimer = setTimeout(() => {
@@ -749,13 +890,16 @@ export async function startAgentRun(
       record.error = boundedErrorText(
         record.cancelReason === "user"
           ? "The worker did not answer the cancel within the grace period; the run is marked for forced cleanup."
-          : "The worker did not answer the wall-clock cancel within the grace period; the run is marked for forced cleanup.",
+          : record.cancelReason === "heartbeat"
+            ? "The worker stopped sending heartbeats and did not answer the cancel within the grace period; the run is marked for forced cleanup."
+            : "The worker did not answer the wall-clock cancel within the grace period; the run is marked for forced cleanup.",
         key,
       );
       persistRecord();
       console.error(
-        `[agent-supervisor] Agent run ${runId} is hung after the cancel grace period; forced cleanup (Phase 26) is required and the paid lock stays held.`,
+        `[agent-supervisor] Agent run ${runId} did not settle within the cancel grace period; starting verified forced cleanup.`,
       );
+      void forceTerminateHungRun();
     }, AGENT_CANCEL_GRACE_MS);
     graceTimer.unref?.();
   };
@@ -774,7 +918,12 @@ export async function startAgentRun(
     try {
       child.send({
         type: "cancel",
-        reason: reason === "watchdog" ? "wall-clock timeout" : "user request",
+        reason:
+          reason === "watchdog"
+            ? "wall-clock timeout"
+            : reason === "heartbeat"
+              ? "heartbeat liveness check"
+              : "user request",
       });
     } catch (error) {
       // The worker may already be gone; the exit handler settles the run.
@@ -905,6 +1054,9 @@ export async function startAgentRun(
       return;
     }
     const message = parsed.data;
+    // Any validated message from the worker proves the process is alive; the
+    // browser launch can legitimately take a while before the first heartbeat.
+    lastHeartbeatAtMs = performance.now();
     if (message.type === "ready") return;
     if (message.type === "started") {
       if (message.runId !== runId) {
@@ -912,8 +1064,18 @@ export async function startAgentRun(
         return;
       }
       // The SDK budget starts when the worker launches the run, so re-anchor
-      // the watchdog; the pre-start timer stays the boot fallback.
+      // the watchdog; the pre-start timer stays the boot fallback. The
+      // liveness check only starts counting from here.
+      startedSeen = true;
+      lastHeartbeatAtMs = performance.now();
       if (!finished && !isTerminalAgentRunStatus(record.status)) armWatchdog();
+      return;
+    }
+    if (message.type === "heartbeat") {
+      if (message.runId !== runId) {
+        protocolViolation("run id mismatch");
+        return;
+      }
       return;
     }
     if (message.type === "error") {
@@ -938,12 +1100,14 @@ export async function startAgentRun(
 
   child.once("error", (error) => {
     markFailed(`The agent worker process failed: ${messageOf(error)}`);
-    if (
-      child.pid === undefined ||
-      child.exitCode !== null ||
-      child.signalCode !== null
-    ) {
+    if (child.pid === undefined) {
+      // The process never spawned, so no group can exist.
       void finish();
+      return;
+    }
+    if (child.exitCode !== null || child.signalCode !== null) {
+      // The child is already reaped; its exit handler owns settlement and the
+      // verified group scan, so releasing here could skip that proof.
       return;
     }
     try {
@@ -962,6 +1126,73 @@ export async function startAgentRun(
     child.once("exit", () => clearTimeout(grace));
   });
 
+  /**
+   * A dead leader is not proof that its group is gone: a hard-killed worker
+   * can leave browser helpers behind. The lock and holder entry are released
+   * only after a verified scan shows no owned process remains; otherwise the
+   * run is reported and the paid lock stays held for manual cleanup.
+   */
+  const settleAfterExit = async (): Promise<void> => {
+    if (finished) return;
+    const worker = record.worker;
+    if (!worker) {
+      await finish();
+      return;
+    }
+    const profileDir = storage.path(["browser-profiles", runId]);
+    let termination: AgentGroupTermination;
+    try {
+      termination = await terminateAgentWorkerGroup(worker, { profileDir });
+    } catch (error) {
+      termination = { status: "skipped", reason: "unverifiable", memberPids: [] };
+      console.error(
+        `[agent-supervisor] Post-exit cleanup of agent run ${runId} could not inspect the process group: ${messageOf(error)}`,
+      );
+    }
+    if (
+      termination.status === "terminated" ||
+      termination.status === "already-gone"
+    ) {
+      await rm(profileDir, { recursive: true, force: true }).catch((error: unknown) => {
+        console.error(
+          `[agent-supervisor] The disposable browser profile of agent run ${runId} could not be removed: ${messageOf(error)}`,
+        );
+      });
+      await finish();
+      return;
+    }
+
+    if (finished) return;
+    const note =
+      termination.status === "skipped"
+        ? `The worker process group could not be verified after exit (${termination.reason}); a live browser may remain and needs manual cleanup (group members: ${termination.memberPids.join(", ") || "none"}).`
+        : `Processes were left behind after exit (${termination.remainingPids.join(", ")}); manual cleanup is required.`;
+    record.error = boundedErrorText(
+      `${record.error ?? "The worker exited."} ${note}`.trim(),
+      key,
+    );
+    record.updatedAt = now().toISOString();
+    persistRecord();
+    console.error(
+      `[agent-supervisor] Agent run ${runId} left processes behind after exit; the paid lock stays held. ${note}`,
+    );
+    await recordUnresolvedAgentGroup(storage, {
+      runId,
+      previousStatus: record.status,
+      outcome: termination.status,
+      reason: termination.status === "skipped" ? termination.reason : null,
+      signals: termination.status === "escaped" ? [...termination.signals] : [],
+      memberPids: termination.status === "skipped" ? [...termination.memberPids] : [],
+      remainingPids: termination.status === "escaped" ? [...termination.remainingPids] : [],
+      lock: "held",
+      message: note,
+    }).catch((error: unknown) => {
+      console.error(
+        `[agent-supervisor] The unresolved agent group of run ${runId} could not be recorded: ${messageOf(error)}`,
+      );
+    });
+  };
+
   child.once("exit", (code, signal) => {
     clearWatchdogs();
     if (!isTerminalAgentRunStatus(record.status)) {
@@ -969,14 +1200,18 @@ export async function startAgentRun(
       const detail = stderrTail
         ? ` ${redactText(stderrTail, key).slice(-detailLimit)}`
         : "";
+      const hungNote =
+        record.watchdogExpiredAt !== null
+          ? " The supervisor force-terminated its verified process group after the watchdog grace period."
+          : "";
       markFailed(
         boundedErrorText(
-          `The worker exited before reporting a result (code ${code ?? "none"}, signal ${signal ?? "none"}).${detail}`,
+          `The worker exited before reporting a result (code ${code ?? "none"}, signal ${signal ?? "none"}).${hungNote}${detail}`,
           key,
         ),
       );
     }
-    void finish();
+    void settleAfterExit();
   });
 
   child.stderr?.setEncoding("utf8");
@@ -1057,6 +1292,7 @@ export async function startAgentRun(
         startUrl: config.origin,
         limits,
         headless: false,
+        heartbeatMs,
       },
       (error) => {
         if (!error) return;
@@ -1088,6 +1324,9 @@ export async function startAgentRun(
       message: record.error ?? "The agent worker could not be started.",
     };
   }
+
+  lastHeartbeatAtMs = performance.now();
+  startHeartbeatWatch();
   return { status: "started", run: { ...record } };
 }
 

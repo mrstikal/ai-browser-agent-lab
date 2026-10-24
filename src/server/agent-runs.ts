@@ -30,9 +30,10 @@ export type AgentRunKind = z.infer<typeof agentRunKindSchema>;
 /**
  * `running` -> `cancelling` -> terminal, or `running` -> `hung` when the
  * watchdog grace period expires before any terminal result; `hung` marks the
- * run for Phase 26 forced cleanup. Terminal statuses are `completed` and
- * `failed`; `completed` only means the worker delivered a terminal result, so
- * always surface `stopReason` too.
+ * run for verified forced cleanup. `interrupted` is written by restart
+ * recovery for orphan runs whose supervisor is gone. Terminal statuses are
+ * `completed`, `failed`, and `interrupted`; `completed` only means the worker
+ * delivered a terminal result, so always surface `stopReason` too.
  */
 export const agentRunLifecycleSchema = z.enum([
   "running",
@@ -40,10 +41,15 @@ export const agentRunLifecycleSchema = z.enum([
   "hung",
   "completed",
   "failed",
+  "interrupted",
 ]);
 export type AgentRunLifecycle = z.infer<typeof agentRunLifecycleSchema>;
 
-export const agentRunCancelReasonSchema = z.enum(["user", "watchdog"]);
+export const agentRunCancelReasonSchema = z.enum([
+  "user",
+  "watchdog",
+  "heartbeat",
+]);
 export type AgentRunCancelReason = z.infer<typeof agentRunCancelReasonSchema>;
 
 export function isActiveAgentRunStatus(status: AgentRunLifecycle): boolean {
@@ -51,7 +57,7 @@ export function isActiveAgentRunStatus(status: AgentRunLifecycle): boolean {
 }
 
 export function isTerminalAgentRunStatus(status: AgentRunLifecycle): boolean {
-  return status === "completed" || status === "failed";
+  return status === "completed" || status === "failed" || status === "interrupted";
 }
 
 export const agentRunEvaluationSchema = z.strictObject({
@@ -229,20 +235,9 @@ export interface AgentRunList {
 
 const RUN_FILE_PATTERN = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.json$/i;
 
-export async function listAgentRuns(
+async function scanAgentRuns(
   storage: Storage,
-  limit: number = AGENT_RUN_LIST_LIMIT,
-): Promise<AgentRunList> {
-  if (
-    !Number.isInteger(limit) ||
-    limit < 1 ||
-    limit > AGENT_RUN_MAX_LIST_LIMIT
-  ) {
-    throw new AgentRunError(
-      `The agent run list limit must be an integer from 1 to ${AGENT_RUN_MAX_LIST_LIMIT}.`,
-    );
-  }
-
+): Promise<{ runs: AgentRunRecord[]; corrupt: number }> {
   const names = await storage.listFiles([AGENT_RUNS_DIR]);
   const runs: AgentRunRecord[] = [];
   let corrupt = 0;
@@ -261,13 +256,48 @@ export async function listAgentRuns(
       corrupt += 1;
     }
   }
-
   runs.sort(
     (left, right) =>
       right.startedAt.localeCompare(left.startedAt) ||
       right.runId.localeCompare(left.runId),
   );
+  return { runs, corrupt };
+}
+
+export async function listAgentRuns(
+  storage: Storage,
+  limit: number = AGENT_RUN_LIST_LIMIT,
+): Promise<AgentRunList> {
+  if (
+    !Number.isInteger(limit) ||
+    limit < 1 ||
+    limit > AGENT_RUN_MAX_LIST_LIMIT
+  ) {
+    throw new AgentRunError(
+      `The agent run list limit must be an integer from 1 to ${AGENT_RUN_MAX_LIST_LIMIT}.`,
+    );
+  }
+  const { runs, corrupt } = await scanAgentRuns(storage);
   return { runs: runs.slice(0, limit), corrupt };
+}
+
+export interface ActiveAgentRunList {
+  /** Every non-terminal run, newest first and unbounded. */
+  readonly runs: readonly AgentRunRecord[];
+  /** Run files that could not be read or validated during the scan. */
+  readonly corrupt: number;
+}
+
+/**
+ * Every run that is not terminal (newest first, unbounded). Restart recovery
+ * needs the whole set, not the newest page, so orphans cannot hide behind the
+ * display limit; corrupt files are counted so recovery can report them.
+ */
+export async function listActiveAgentRuns(
+  storage: Storage,
+): Promise<ActiveAgentRunList> {
+  const { runs, corrupt } = await scanAgentRuns(storage);
+  return { runs: runs.filter((run) => isActiveAgentRunStatus(run.status)), corrupt };
 }
 
 /** Appends one validated, already-bounded worker event. */

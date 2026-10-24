@@ -12,6 +12,7 @@ import {
   type ImageJobSnapshot,
   type ImageJobStatus,
   type ReconcileResult,
+  clampJobUpdatedAt,
 } from "./image-state";
 import { isProductId } from "./image-validation";
 import {
@@ -165,7 +166,7 @@ async function markInterruptedJob(
           }
         : target,
     ),
-    updatedAt: now.toISOString(),
+    updatedAt: clampJobUpdatedAt(job, now),
   };
   await saveImageJob(storage, marked);
   return "interrupted";
@@ -242,7 +243,11 @@ export async function recoverInterruptedImageState(
       // but the image state can still be reconciled without touching it.
       needsRecoveryLock = false;
     } else {
-      needsRecoveryLock = true;
+      // A stale foreign lock (for example an abandoned agent run) belongs to
+      // its own phase: reclaiming it here could free the paid lock while an
+      // orphan browser group is still alive. Agent recovery verifies and
+      // terminates that group first.
+      needsRecoveryLock = lockMeta.kind === PAID_JOB_LOCK_KIND;
     }
   }
 

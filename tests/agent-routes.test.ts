@@ -17,8 +17,13 @@ import {
 } from "@/server/agent-manager";
 import {
   isTerminalAgentRunStatus,
+  loadAgentRun,
   type AgentRunRecord,
 } from "@/server/agent-runs";
+import {
+  AGENT_SIGKILL_GRACE_MS,
+  AGENT_SIGTERM_GRACE_MS,
+} from "@/server/agent-group";
 import {
   resetCredentialHolderForTests,
   setOpenRouterKey,
@@ -84,6 +89,11 @@ interface StatusBody {
   gate: { keyAvailable: boolean; verified: boolean; reason: string };
   runs: AgentRunRecord[];
   corruptRuns: number;
+  recovery: {
+    status: string;
+    unresolvedCount: number;
+    unresolved: Array<{ runId: string; outcome: string; lock: string }>;
+  } | null;
 }
 
 async function getStatus(): Promise<StatusBody> {
@@ -257,6 +267,7 @@ describe("agent run API routes", () => {
         startedBody.run.runId,
       ]);
       expect(status.corruptRuns).toBe(0);
+      expect(status.recovery).toBeNull();
       expect(JSON.stringify(status)).not.toContain(TEST_KEY);
     },
   );
@@ -369,21 +380,38 @@ describe("agent run API routes", () => {
           error: { code: string };
         };
         expect(cancelledBody.error.code).toBe("run-hung");
+
+        // The supervisor force-terminates the verified group itself; drive
+        // the faked termination graces until the run settles.
+        const deadline = Date.now() + 20_000;
+        const storage = createStorage();
+        let record = await loadAgentRun(storage, runId);
+        while (
+          Date.now() < deadline &&
+          record !== undefined &&
+          !isTerminalAgentRunStatus(record.status)
+        ) {
+          await vi.advanceTimersByTimeAsync(
+            AGENT_SIGTERM_GRACE_MS + AGENT_SIGKILL_GRACE_MS,
+          );
+          const realUntil = Date.now() + 100;
+          while (Date.now() < realUntil) {
+            await new Promise<void>((resolvePromise) =>
+              setImmediate(resolvePromise),
+            );
+          }
+          record = await loadAgentRun(storage, runId);
+        }
+        expect(record?.status).toBe("failed");
       } finally {
         vi.useRealTimers();
       }
 
-      // Forced cleanup stand-in (Phase 26 owns the real group termination).
-      if (pid > 0) {
-        try {
-          process.kill(pid, "SIGKILL");
-        } catch {
-          // The process may already be gone.
-        }
-      }
-      const deadline = Date.now() + 10_000;
+      expect(pid).toBeGreaterThan(0);
+      // The supervisor may still be finishing its verified post-exit scan.
       let status = await getStatus();
-      while (Date.now() < deadline && status.activeRunId !== null) {
+      const releaseDeadline = Date.now() + 10_000;
+      while (Date.now() < releaseDeadline && status.activeRunId !== null) {
         await sleep(50);
         status = await getStatus();
       }
@@ -391,6 +419,7 @@ describe("agent run API routes", () => {
       const hung = status.runs.find((run) => run.runId === runId);
       expect(hung?.watchdogExpiredAt).not.toBeNull();
       expect(hung?.status).toBe("failed");
+      expect(hung?.error).toMatch(/force-terminated|exited before reporting/);
     },
   );
 

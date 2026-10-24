@@ -148,6 +148,7 @@ describe("agent run records", () => {
     expect(agentRunLifecycleCase("hung")).toBe("active");
     expect(agentRunLifecycleCase("completed")).toBe("terminal");
     expect(agentRunLifecycleCase("failed")).toBe("terminal");
+    expect(agentRunLifecycleCase("interrupted")).toBe("terminal");
   });
 });
 

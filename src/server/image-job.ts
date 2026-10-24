@@ -10,6 +10,7 @@ import {
   isActiveImageJobStatus,
   loadImageJob,
   saveImageJob,
+  clampJobUpdatedAt,
   type ImageJobQuote,
   type ImageJobSnapshot,
 } from "./image-state";
@@ -144,12 +145,9 @@ export async function updateImageJob(
     if (!current || current.jobId !== jobId) return null;
     const next = update(current);
     if (next === null) return current;
-    // The host wall clock can step backwards (WSL/NTP resync). A per-record
-    // monotonic updatedAt keeps a legitimate write from being rejected as
-    // corruption; every other field is still validated by saveImageJob.
-    const updatedAt = new Date(
-      Math.max(now.getTime(), Date.parse(current.updatedAt)),
-    ).toISOString();
+    // A per-record monotonic updatedAt keeps a backwards clock step from
+    // being rejected as corruption; every other field is still validated.
+    const updatedAt = clampJobUpdatedAt(current, now);
     const saved: ImageJobSnapshot = {
       ...next,
       jobId: current.jobId,
@@ -347,11 +345,12 @@ export async function requestImageJobStop(options: {
     }
 
     const now = options.now ?? new Date();
+    const stamp = clampJobUpdatedAt(job, now);
     const updated: ImageJobSnapshot = {
       ...job,
       status: "stopping",
-      stopRequest: { jobId: job.jobId, requestedAt: now.toISOString() },
-      updatedAt: now.toISOString(),
+      stopRequest: { jobId: job.jobId, requestedAt: stamp },
+      updatedAt: stamp,
     };
     await saveImageJob(options.storage, updated);
     return { applied: true, job: updated };

@@ -21,6 +21,7 @@ import {
   PAID_JOB_LOCK_SEGMENTS,
   PAID_JOB_LOCK_KIND,
 } from "../src/server/image-job";
+import { AGENT_RUN_LOCK_KIND } from "../src/server/paid-lock";
 import {
   appendStartedAttempt,
   createImageJobSnapshot,
@@ -347,6 +348,51 @@ describe("image restart recovery", () => {
     expect(stopped?.status).toBe("interrupted");
     expect(stopped?.stopRequest?.jobId).toBe(jobId);
     expect((await loadImageRecoveryReport(storage))?.status).toBe("reconciled");
+  });
+
+  it("leaves a stale agent-run lock for the agent recovery phase", async () => {
+    const storage = await makeStorage();
+    await seedValidImages(storage, 23);
+    await writeLockMetadata(storage, {
+      kind: AGENT_RUN_LOCK_KIND,
+      ownerId: attemptId(910),
+    });
+
+    const result = await recoverInterruptedImageState({ storage });
+
+    expect(result.lockReleased).toBe(false);
+    // The foreign stale lock survives so the agent phase can verify and
+    // terminate the orphan worker group before the paid lock is freed.
+    expect(
+      await readLockMetadata(storage.path(PAID_JOB_LOCK_SEGMENTS)),
+    ).toMatchObject({ kind: AGENT_RUN_LOCK_KIND });
+  });
+
+  it("clamps a backwards clock step while marking a job interrupted", async () => {
+    const storage = await makeStorage();
+    await seedValidImages(storage, 23);
+    await saveRunningJob(storage);
+    const job = (await loadImageJob(storage)) as NonNullable<
+      Awaited<ReturnType<typeof loadImageJob>>
+    >;
+    // Simulate a clock step backwards after this job's timestamps were stored.
+    const future = new Date(Date.parse(job.updatedAt) + 5_000);
+    await saveImageJob(storage, { ...job, updatedAt: future.toISOString() });
+
+    const result = await recoverInterruptedImageState({
+      storage,
+      now: new Date(future.getTime() - 4_000),
+    });
+    expect(result.status).toBe("reconciled");
+    expect(result.jobMarked).toBe("interrupted");
+    const marked = await loadImageJob(storage);
+    expect(marked?.status).toBe("interrupted");
+    // The clamp keeps the stored order intact instead of reporting corruption.
+    expect(marked?.updatedAt).toBe(future.toISOString());
+    expect(
+      Date.parse(marked?.updatedAt ?? "") >=
+        Date.parse(marked?.createdAt ?? ""),
+    ).toBe(true);
   });
 
   it("quarantines old and invalid attempt-matched files", async () => {

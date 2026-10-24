@@ -469,6 +469,51 @@ describe("isolated agent worker", () => {
   );
 
   it(
+    "sends liveness heartbeats while a run is active",
+    { timeout: 30_000 },
+    async () => {
+      const base = await makeBase();
+      const dataDir = join(base, "data");
+      const markersDir = join(base, "markers");
+      const worker = startWorker(workerEnv(dataDir, markersDir, "hang"));
+
+      await worker.waitFor("ready");
+      worker.send(startMessage({ heartbeatMs: 250 }));
+      await worker.waitFor("started");
+      const first = await worker.waitFor("heartbeat");
+      expect(first.runId).toBe(RUN_ID);
+      expect(typeof first.at).toBe("string");
+
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      const heartbeats = worker.messages.filter(
+        (message) => message.type === "heartbeat",
+      );
+      expect(heartbeats.length).toBeGreaterThanOrEqual(2);
+      for (const heartbeat of heartbeats) {
+        expect(agentWorkerMessageSchema.safeParse(heartbeat).success).toBe(true);
+      }
+
+      worker.send({ type: "cancel", reason: "test done" });
+      const result = await worker.waitFor("result");
+      expect(result.status).toBe("cancelled");
+      const beforeResult = worker.messages.filter(
+        (message) => message.type === "heartbeat",
+      ).length;
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      expect(
+        worker.messages.filter((message) => message.type === "heartbeat"),
+      ).toHaveLength(beforeResult);
+      const exit = await worker.waitForExit();
+      expect(exit.code).toBe(0);
+      const close = await readMarker<Record<string, unknown>>(
+        markersDir,
+        "close.json",
+      );
+      expect(close.count).toBe(1);
+    },
+  );
+
+  it(
     "reports a launch failure as a terminal error and removes the profile",
     { timeout: 30_000 },
     async () => {

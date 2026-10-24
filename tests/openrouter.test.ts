@@ -226,7 +226,9 @@ describe("OpenRouter key validation", () => {
     const slowBody = await startMock((_request, response) => {
       response.writeHead(200, { "content-type": "application/json" });
       response.write('{"data":');
-      setTimeout(() => response.end("{}}"), 300);
+      // Keep a wide margin over the 30 ms client timeout so event-loop load
+      // cannot make the body finish first.
+      setTimeout(() => response.end("{}}"), 600);
     });
     expect(
       await validateOpenRouterKey("sk-or-v1-slow-body", {

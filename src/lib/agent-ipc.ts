@@ -25,6 +25,13 @@ export const AGENT_RUN_MAX_TIMEOUT_MS = 1_800_000;
 export const AGENT_RUN_MAX_COST_USD = 100;
 
 export const AGENT_WORKER_MAX_EVENTS = 1_000;
+/**
+ * Periodic liveness heartbeat while a run is active. The supervisor derives
+ * its silence timeout from this interval (at least 3x, never below 2 s).
+ */
+export const AGENT_WORKER_HEARTBEAT_MS = 5_000;
+export const AGENT_WORKER_MIN_HEARTBEAT_MS = 250;
+export const AGENT_WORKER_MAX_HEARTBEAT_MS = 30_000;
 export const AGENT_WORKER_MAX_OUTPUT_CHARS = 20_000;
 export const AGENT_WORKER_MAX_ERROR_CHARS = 2_000;
 export const AGENT_WORKER_MAX_TASK_CHARS = 4_000;
@@ -63,6 +70,13 @@ export const agentStartMessageSchema = z.strictObject({
   startUrl: z.string().trim().min(1).max(300),
   limits: agentRunLimitsSchema,
   headless: z.boolean(),
+  /** Heartbeat interval; defaults to AGENT_WORKER_HEARTBEAT_MS. */
+  heartbeatMs: z
+    .number()
+    .int()
+    .min(AGENT_WORKER_MIN_HEARTBEAT_MS)
+    .max(AGENT_WORKER_MAX_HEARTBEAT_MS)
+    .optional(),
 });
 export type AgentStartMessage = z.infer<typeof agentStartMessageSchema>;
 
@@ -102,6 +116,15 @@ export const AGENT_WORKER_EVENT_KINDS = [
 
 export const agentWorkerEventKindSchema = z.enum(AGENT_WORKER_EVENT_KINDS);
 export type AgentWorkerEventKind = z.infer<typeof agentWorkerEventKindSchema>;
+
+export const agentWorkerHeartbeatMessageSchema = z.strictObject({
+  type: z.literal("heartbeat"),
+  runId: z.uuid(),
+  at: z.iso.datetime(),
+});
+export type AgentWorkerHeartbeatMessage = z.infer<
+  typeof agentWorkerHeartbeatMessageSchema
+>;
 
 export const agentWorkerEventMessageSchema = z.strictObject({
   type: z.literal("event"),
@@ -152,6 +175,7 @@ export type AgentWorkerErrorMessage = z.infer<
 export const agentWorkerMessageSchema = z.discriminatedUnion("type", [
   agentWorkerReadyMessageSchema,
   agentWorkerStartedMessageSchema,
+  agentWorkerHeartbeatMessageSchema,
   agentWorkerEventMessageSchema,
   agentWorkerResultMessageSchema,
   agentWorkerErrorMessageSchema,

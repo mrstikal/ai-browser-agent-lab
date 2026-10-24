@@ -1456,6 +1456,20 @@ export function parseImageJobSnapshot(value: unknown): ImageJobSnapshot {
   };
 }
 
+/**
+ * Clamps a job's `updatedAt` so it never moves behind the stored value. The
+ * host wall clock can step backwards (WSL/NTP resync), which would otherwise
+ * make a legitimate write fail the persisted timestamp-order validation.
+ */
+export function clampJobUpdatedAt(
+  job: Pick<ImageJobSnapshot, "createdAt" | "updatedAt">,
+  at: Date,
+): string {
+  return new Date(
+    Math.max(at.getTime(), Date.parse(job.updatedAt), Date.parse(job.createdAt)),
+  ).toISOString();
+}
+
 export function createImageJobSnapshot(options: {
   readonly jobId: string;
   readonly productIds: readonly ProductId[];

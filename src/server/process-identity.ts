@@ -22,7 +22,10 @@ const DEFAULT_PROC_ROOT = "/proc";
 const MAX_BOOT_ID_LENGTH = 128;
 
 function isNotFound(error: unknown): boolean {
-  return (error as NodeJS.ErrnoException).code === "ENOENT";
+  const code = (error as NodeJS.ErrnoException).code;
+  // ESRCH shows up as a race when a process exits between the path check and
+  // the read; both mean "no such process" for identity purposes.
+  return code === "ENOENT" || code === "ESRCH";
 }
 
 function procRoot(options: ProcOptions): string {

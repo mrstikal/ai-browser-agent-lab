@@ -14,6 +14,10 @@ import {
 import { HEALTH_MARKER } from "../src/lib/health";
 import { saveAgentCompatibility } from "../src/server/agent-compatibility";
 import {
+  AGENT_SIGKILL_GRACE_MS,
+  AGENT_SIGTERM_GRACE_MS,
+} from "../src/server/agent-group";
+import {
   AGENT_CANCEL_GRACE_MS,
   AGENT_VERIFICATION_LIMITS,
   AGENT_WATCHDOG_MARGIN_MS,
@@ -60,6 +64,8 @@ import {
   readProcessGroupId,
   readProcessStartTicks,
 } from "../src/server/process-identity";
+import { loadAgentRecoveryReport } from "../src/server/agent-recovery";
+import { listAgentGroupMembers } from "../src/server/agent-group";
 import { createStorage, type Storage } from "../src/server/storage";
 
 const TEST_KEY = "supervisor-test-secret-key-77";
@@ -213,6 +219,57 @@ async function waitForRecord(
     }
     await new Promise<void>((resolvePromise) => setImmediate(resolvePromise));
   }
+}
+
+/**
+ * Fake-timer safe condition driver: advances the faked termination graces
+ * between checks and yields real time so signals and reaping can complete.
+ */
+async function driveFakeTimersUntil(
+  predicate: () => Promise<boolean>,
+  timeoutMs = 15_000,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (await predicate()) return true;
+    if (Date.now() >= deadline) return false;
+    await vi.advanceTimersByTimeAsync(
+      AGENT_SIGTERM_GRACE_MS + AGENT_SIGKILL_GRACE_MS,
+    );
+    const realUntil = Date.now() + 50;
+    while (Date.now() < realUntil) {
+      await new Promise<void>((resolvePromise) => setImmediate(resolvePromise));
+    }
+  }
+}
+
+/**
+ * Fake-timer safe: advances faked termination graces while yielding real time
+ * so the OS can deliver signals and reap processes.
+ */
+async function driveTermination(
+  storage: Storage,
+  runId: string,
+  timeoutMs = 20_000,
+): Promise<AgentRunRecord> {
+  const deadline = Date.now() + timeoutMs;
+  let record = await loadAgentRun(storage, runId);
+  while (
+    Date.now() < deadline &&
+    record !== undefined &&
+    !isTerminalAgentRunStatus(record.status)
+  ) {
+    await vi.advanceTimersByTimeAsync(
+      AGENT_SIGTERM_GRACE_MS + AGENT_SIGKILL_GRACE_MS,
+    );
+    const realUntil = Date.now() + 100;
+    while (Date.now() < realUntil) {
+      await new Promise<void>((resolvePromise) => setImmediate(resolvePromise));
+    }
+    record = await loadAgentRun(storage, runId);
+  }
+  if (record === undefined) throw new Error("Agent run record disappeared.");
+  return record;
 }
 
 async function waitForMarkerFile(
@@ -1050,30 +1107,21 @@ describe("agent supervisor", () => {
           }),
         ).toEqual({ status: "run-hung", runId });
 
-        // Forced cleanup stand-in: kill the process, then the supervisor may
-        // release the lock because ownership is now proven gone.
-        const pid = started.run.worker?.pid ?? 0;
-        expect(pid).toBeGreaterThan(0);
-        process.kill(pid, "SIGKILL");
-        const deadline = Date.now() + 10_000;
-        while (
-          Date.now() < deadline &&
-          (await readLockMetadata(
-            context.storage.path(PAID_JOB_LOCK_SEGMENTS),
-          ).catch(() => null)) !== undefined
-        ) {
-          await new Promise<void>((resolvePromise) =>
-            setImmediate(resolvePromise),
-          );
-        }
-        expect(
-          await readLockMetadata(context.storage.path(PAID_JOB_LOCK_SEGMENTS)),
-        ).toBeUndefined();
+        // The supervisor force-terminates the verified group itself; drive
+        // the faked termination graces until the run settles.
+        const finalized = await driveTermination(context.storage, runId);
+        expect(finalized).toMatchObject({ status: "failed" });
+        expect(finalized.error).toMatch(/force-terminated/);
+        expect(finalized.watchdogExpiredAt).not.toBeNull();
+        const released = await driveFakeTimersUntil(
+          async () =>
+            (await readLockMetadata(
+              context.storage.path(PAID_JOB_LOCK_SEGMENTS),
+            ).catch(() => null)) === undefined,
+        );
+        expect(released).toBe(true);
         expect(getActiveAgentRunId(context.storage.root)).toBeNull();
         expect(isPaidOperationActive()).toBe(false);
-        const finalized = await loadAgentRun(context.storage, runId);
-        expect(finalized?.status).toBe("failed");
-        expect(finalized?.watchdogExpiredAt).not.toBeNull();
       } finally {
         vi.useRealTimers();
       }
@@ -1145,6 +1193,374 @@ describe("agent supervisor", () => {
         cancelReason: "watchdog",
         watchdogExpiredAt: null,
       });
+    },
+  );
+
+  it(
+    "force-terminates a hung mock worker and its grandchild with no descendant left",
+    { timeout: 45_000 },
+    async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        const context = await makeContext("grandchild-hang");
+        await seedKey(context);
+        await seedStamp(context);
+
+        const started = await startAgentRun({
+          kind: "task",
+          task: "Read the main heading.",
+          limits: { timeoutMs: 10_000 },
+          env: context.env,
+          storage: context.storage,
+        });
+        expect(started.status).toBe("started");
+        if (started.status !== "started") return;
+        const runId = started.run.runId;
+        const groupId = started.run.worker?.groupId ?? 0;
+        await waitForMarkerFile(context.markersDir, "grandchild.json");
+        const grandchild = await readMarker<{ pid: number | null }>(
+          context.markersDir,
+          "grandchild.json",
+        );
+        const grandchildPid = grandchild.pid ?? 0;
+        expect(grandchildPid).toBeGreaterThan(0);
+
+        await vi.advanceTimersByTimeAsync(
+          10_000 + AGENT_WATCHDOG_MARGIN_MS + AGENT_CANCEL_GRACE_MS,
+        );
+        const finalized = await driveTermination(context.storage, runId);
+        expect(finalized).toMatchObject({ status: "failed" });
+        expect(finalized.error).toMatch(/force-terminated/);
+        expect(finalized.error).toMatch(/SIGTERM/);
+        expect(finalized.watchdogExpiredAt).not.toBeNull();
+
+        // No descendant may survive the forced cancellation, and the forced
+        // kill skipped the worker's own cleanup, so the profile is removed by
+        // the supervisor instead.
+        const cleanedUp = await driveFakeTimersUntil(async () => {
+          const members = await listAgentGroupMembers(groupId);
+          return (
+            members.length === 0 &&
+            !existsSync(join(context.dataDir, "browser-profiles", runId))
+          );
+        });
+        expect(cleanedUp).toBe(true);
+        expect(await listAgentGroupMembers(groupId)).toEqual([]);
+        expect(await readProcessStartTicks(grandchildPid)).toBeUndefined();
+        expect(
+          existsSync(join(context.dataDir, "browser-profiles", runId)),
+        ).toBe(false);
+
+        const released = await driveFakeTimersUntil(
+          async () =>
+            (await readLockMetadata(
+              context.storage.path(PAID_JOB_LOCK_SEGMENTS),
+            ).catch(() => null)) === undefined,
+        );
+        expect(released).toBe(true);
+        expect(getActiveAgentRunId(context.storage.root)).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it(
+    "escalates to SIGKILL for a grandchild mock that ignores SIGTERM",
+    { timeout: 45_000 },
+    async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        const context = await makeContext("grandchild-hang-no-term");
+        await seedKey(context);
+        await seedStamp(context);
+
+        const started = await startAgentRun({
+          kind: "task",
+          task: "Read the main heading.",
+          limits: { timeoutMs: 10_000 },
+          env: context.env,
+          storage: context.storage,
+        });
+        expect(started.status).toBe("started");
+        if (started.status !== "started") return;
+        const runId = started.run.runId;
+        const groupId = started.run.worker?.groupId ?? 0;
+        const workerPid = started.run.worker?.pid ?? 0;
+        await waitForMarkerFile(context.markersDir, "grandchild.json");
+
+        await vi.advanceTimersByTimeAsync(
+          10_000 + AGENT_WATCHDOG_MARGIN_MS + AGENT_CANCEL_GRACE_MS,
+        );
+        const finalized = await driveTermination(context.storage, runId);
+        expect(finalized).toMatchObject({ status: "failed" });
+        // Escalation evidence: the group survived SIGTERM and needed SIGKILL.
+        expect(finalized.error).toMatch(/force-terminated|exited before reporting/);
+        expect(finalized.error).toMatch(/SIGKILL/);
+
+        const cleanedUp = await driveFakeTimersUntil(
+          async () => (await listAgentGroupMembers(groupId)).length === 0,
+        );
+        expect(cleanedUp).toBe(true);
+        expect(await listAgentGroupMembers(groupId)).toEqual([]);
+        expect(await readProcessStartTicks(workerPid)).toBeUndefined();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it(
+    "cleans up an owned grandchild left behind by a hard worker exit",
+    { timeout: 30_000 },
+    async () => {
+      const context = await makeContext("grandchild-orphan-owned");
+      await seedKey(context);
+      await seedStamp(context);
+
+      const started = await startAgentRun({
+        kind: "task",
+        task: "Read the main heading.",
+        env: context.env,
+        storage: context.storage,
+      });
+      expect(started.status).toBe("started");
+      if (started.status !== "started") return;
+      const runId = started.run.runId;
+      const groupId = started.run.worker?.groupId ?? 0;
+      await waitForMarkerFile(context.markersDir, "grandchild.json");
+      const grandchild = await readMarker<{ pid: number | null }>(
+        context.markersDir,
+        "grandchild.json",
+      );
+      const grandchildPid = grandchild.pid ?? 0;
+      expect(grandchildPid).toBeGreaterThan(0);
+
+      const finished = await waitForTerminal(context.storage, runId);
+      expect(finished.status).toBe("failed");
+      expect(finished.error).toContain("exited before reporting");
+
+      const deadline = Date.now() + 15_000;
+      while (Date.now() < deadline) {
+        if (
+          (await listAgentGroupMembers(groupId)).length === 0 &&
+          (await readLockMetadata(
+            context.storage.path(PAID_JOB_LOCK_SEGMENTS),
+          ).catch(() => null)) === undefined
+        ) {
+          break;
+        }
+        await sleep(50);
+      }
+      expect(await listAgentGroupMembers(groupId)).toEqual([]);
+      expect(await readProcessStartTicks(grandchildPid)).toBeUndefined();
+      expect(
+        await readLockMetadata(context.storage.path(PAID_JOB_LOCK_SEGMENTS)),
+      ).toBeUndefined();
+      expect(getActiveAgentRunId(context.storage.root)).toBeNull();
+      expect(
+        existsSync(join(context.dataDir, "browser-profiles", runId)),
+      ).toBe(false);
+    },
+  );
+
+  it(
+    "keeps the paid lock when an exited worker left an unowned group",
+    { timeout: 30_000 },
+    async () => {
+      const context = await makeContext("grandchild-orphan-unowned");
+      await seedKey(context);
+      await seedStamp(context);
+
+      const started = await startAgentRun({
+        kind: "task",
+        task: "Read the main heading.",
+        env: context.env,
+        storage: context.storage,
+      });
+      expect(started.status).toBe("started");
+      if (started.status !== "started") return;
+      const runId = started.run.runId;
+      await waitForMarkerFile(context.markersDir, "grandchild.json");
+      const grandchild = await readMarker<{ pid: number | null }>(
+        context.markersDir,
+        "grandchild.json",
+      );
+      const grandchildPid = grandchild.pid ?? 0;
+      expect(grandchildPid).toBeGreaterThan(0);
+
+      const finished = await waitForTerminal(context.storage, runId);
+      expect(finished.status).toBe("failed");
+
+      // The unowned process group cannot be attributed to this run, so the
+      // supervisor reports it and keeps the lock plus the active registration.
+      const deadline = Date.now() + 15_000;
+      let run = finished;
+      while (Date.now() < deadline && !/manual cleanup/.test(run.error ?? "")) {
+        await sleep(50);
+        run = (await loadAgentRun(context.storage, runId)) ?? run;
+      }
+      expect(run.error).toContain("manual cleanup");
+      expect(
+        await readLockMetadata(context.storage.path(PAID_JOB_LOCK_SEGMENTS)),
+      ).toBeDefined();
+      expect(getActiveAgentRunId(context.storage.root)).toBe(runId);
+      expect(await readProcessStartTicks(grandchildPid)).toBeDefined();
+      // The unresolved group is recorded so the next boot retries it and
+      // keeps the barrier until the group is proven gone.
+      const report = await loadAgentRecoveryReport(context.storage);
+      expect(
+        report?.runs.find((entry) => entry.runId === runId),
+      ).toMatchObject({ outcome: "skipped", lock: "held" });
+      const snapshot = await loadAgentStatus({
+        storage: context.storage,
+        env: context.env,
+      });
+      expect(snapshot.recovery).toMatchObject({
+        status: "reconciled",
+        unresolvedCount: 1,
+      });
+      expect(snapshot.recovery?.unresolved[0]).toMatchObject({
+        runId,
+        outcome: "skipped",
+        lock: "held",
+      });
+
+      try {
+        process.kill(grandchildPid, "SIGKILL");
+      } catch {
+        // Already gone.
+      }
+    },
+  );
+
+  it(
+    "keeps a long run alive while heartbeats arrive",
+    { timeout: 30_000 },
+    async () => {
+      const context = await makeContext("slow");
+      context.env.AGENT_WORKER_FAKE_DELAY_MS = "3000";
+      await seedKey(context);
+      await seedStamp(context);
+
+      const started = await startAgentRun({
+        kind: "task",
+        task: "Read the main heading.",
+        heartbeatMs: 250,
+        env: context.env,
+        storage: context.storage,
+      });
+      expect(started.status).toBe("started");
+      if (started.status !== "started") return;
+      const finished = await waitForTerminal(context.storage, started.run.runId);
+      await waitForIdle(context.storage);
+
+      // The liveness timeout is 2 s; without processed heartbeats this run
+      // would have been cancelled long before its 3 s completion.
+      expect(finished).toMatchObject({
+        status: "completed",
+        stopReason: "completed",
+        cancelRequestedAt: null,
+        cancelReason: null,
+      });
+    },
+  );
+
+  it(
+    "does not cancel a run whose browser launch outlasts the heartbeat timeout",
+    { timeout: 30_000 },
+    async () => {
+      const context = await makeContext("success");
+      // `started` only arrives after the browser launch; the liveness check
+      // must not count silence before it.
+      context.env.AGENT_WORKER_FAKE_CREATE_DELAY_MS = "2500";
+      await seedKey(context);
+      await seedStamp(context);
+
+      const started = await startAgentRun({
+        kind: "task",
+        task: "Read the main heading.",
+        heartbeatMs: 250,
+        env: context.env,
+        storage: context.storage,
+      });
+      expect(started.status).toBe("started");
+      if (started.status !== "started") return;
+      const finished = await waitForTerminal(context.storage, started.run.runId);
+      await waitForIdle(context.storage);
+
+      expect(finished).toMatchObject({
+        status: "completed",
+        stopReason: "completed",
+        cancelRequestedAt: null,
+        cancelReason: null,
+      });
+    },
+  );
+
+  it(
+    "cancels a worker that stops sending heartbeats",
+    { timeout: 45_000 },
+    async () => {
+      vi.useFakeTimers({
+        toFake: [
+          "setTimeout",
+          "clearTimeout",
+          "setInterval",
+          "clearInterval",
+          "performance",
+        ],
+      });
+      try {
+        const context = await makeContext("blocked");
+        await seedKey(context);
+        await seedStamp(context);
+
+        const started = await startAgentRun({
+          kind: "task",
+          task: "Read the main heading.",
+          limits: { timeoutMs: 10_000 },
+          heartbeatMs: 500,
+          env: context.env,
+          storage: context.storage,
+        });
+        expect(started.status).toBe("started");
+        if (started.status !== "started") return;
+        const runId = started.run.runId;
+        const groupId = started.run.worker?.groupId ?? 0;
+        await waitForMarkerFile(context.markersDir, "run.json");
+
+        // The heartbeat timeout is max(3 * 500 ms, 2 s); the blocked worker
+        // cannot send heartbeats or process the cancel.
+        await vi.advanceTimersByTimeAsync(3_000);
+        const cancelling = await waitForRecord(
+          context.storage,
+          runId,
+          (record) => record.status === "cancelling",
+        );
+        expect(cancelling.cancelReason).toBe("heartbeat");
+
+        await vi.advanceTimersByTimeAsync(AGENT_CANCEL_GRACE_MS);
+        const finalized = await driveTermination(context.storage, runId);
+        expect(finalized.status).toBe("failed");
+        expect(finalized.watchdogExpiredAt).not.toBeNull();
+        expect(finalized.error).toMatch(/force-terminated|exited before reporting/);
+
+        const cleanedUp = await driveFakeTimersUntil(
+          async () => (await listAgentGroupMembers(groupId)).length === 0,
+        );
+        expect(cleanedUp).toBe(true);
+        const released = await driveFakeTimersUntil(
+          async () =>
+            (await readLockMetadata(
+              context.storage.path(PAID_JOB_LOCK_SEGMENTS),
+            ).catch(() => null)) === undefined,
+        );
+        expect(released).toBe(true);
+        expect(getActiveAgentRunId(context.storage.root)).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
     },
   );
 

@@ -56,10 +56,11 @@ describe("agent run limits", () => {
 describe("agent start messages", () => {
   it("accepts a bounded start message", () => {
     const parsed = agentStartMessageSchema.parse(
-      startMessage({ task: "  Read the heading.  " }),
+      startMessage({ task: "  Read the heading.  ", heartbeatMs: 250 }),
     );
     expect(parsed.task).toBe("Read the heading.");
     expect(parsed.headless).toBe(false);
+    expect(parsed.heartbeatMs).toBe(250);
   });
 
   it("rejects malformed, oversized, and extended messages", () => {
@@ -72,6 +73,8 @@ describe("agent start messages", () => {
       { startUrl: "x".repeat(301) },
       { headless: "yes" },
       { limits: undefined },
+      { heartbeatMs: 100 },
+      { heartbeatMs: 31_000 },
       { extra: true },
     ]) {
       expect(
@@ -139,6 +142,13 @@ describe("worker messages", () => {
         type: "started",
         runId,
         startedAt: new Date().toISOString(),
+      }).success,
+    ).toBe(true);
+    expect(
+      agentWorkerMessageSchema.safeParse({
+        type: "heartbeat",
+        runId,
+        at: new Date().toISOString(),
       }).success,
     ).toBe(true);
     expect(

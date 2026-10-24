@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -78,6 +79,44 @@ const agent = {
         else options.signal?.addEventListener("abort", finish, { once: true });
       });
     }
+    if (
+      mode === "grandchild-orphan-owned" ||
+      mode === "grandchild-orphan-unowned"
+    ) {
+      // The worker dies hard (no SDK result, no finally cleanup) leaving the
+      // grandchild in its process group.
+      const profileDir = lastOptions?.browser?.profileDir ?? null;
+      const argv0 =
+        mode === "grandchild-orphan-owned" && profileDir
+          ? `--user-data-dir=${profileDir}`
+          : "agent-worker-grandchild";
+      const grandchild = spawn(
+        process.execPath,
+        ["-e", "setInterval(() => {}, 1000)"],
+        { argv0, stdio: "ignore" },
+      );
+      grandchild.unref();
+      mark("grandchild.json", { pid: grandchild.pid ?? null, argv0 });
+      process.exit(0);
+    }
+    if (mode === "grandchild-hang" || mode === "grandchild-hang-no-term") {
+      if (mode === "grandchild-hang-no-term") {
+        // The worker survives SIGTERM so forced cleanup must escalate.
+        process.on("SIGTERM", () => {});
+      }
+      const profileDir = lastOptions?.browser?.profileDir ?? null;
+      const argv0 = profileDir
+        ? `--user-data-dir=${profileDir}`
+        : "agent-worker-grandchild";
+      const grandchild = spawn(
+        process.execPath,
+        ["-e", "setInterval(() => {}, 1000)"],
+        { argv0, stdio: "ignore" },
+      );
+      grandchild.unref();
+      mark("grandchild.json", { pid: grandchild.pid ?? null, argv0 });
+      await new Promise(() => {});
+    }
     if (mode === "hang-forever") {
       // Ignores the abort signal entirely: the supervisor watchdog must mark
       // this run for forced cleanup instead of unlocking or completing it.
@@ -113,7 +152,15 @@ const agent = {
       };
     }
     if (mode === "slow") {
-      await new Promise((resolve) => setTimeout(resolve, 300));
+      const delay = Number(process.env.AGENT_WORKER_FAKE_DELAY_MS ?? 300);
+      await new Promise((resolve) =>
+        setTimeout(resolve, Number.isFinite(delay) ? delay : 300),
+      );
+    }
+    if (mode === "blocked") {
+      // Blocks the worker event loop (and therefore its heartbeats and cancel
+      // handling) without burning CPU; only an OS signal can stop it.
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 120_000);
     }
     if (mode === "flood") {
       for (let index = 0; index < 1100; index += 1) {
@@ -189,6 +236,10 @@ const agent = {
 
 export const BrowserUse = {
   create: async (options) => {
+    const createDelay = Number(process.env.AGENT_WORKER_FAKE_CREATE_DELAY_MS ?? 0);
+    if (Number.isFinite(createDelay) && createDelay > 0) {
+      await new Promise((resolve) => setTimeout(resolve, createDelay));
+    }
     mark("create.json", {
       model: options.model,
       telemetry: options.telemetry,
