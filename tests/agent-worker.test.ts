@@ -9,6 +9,10 @@ import {
   AGENT_WORKER_MAX_EVENTS,
   agentWorkerMessageSchema,
 } from "../src/lib/agent-ipc";
+import {
+  blockedOriginInCode,
+  cleanupVerifiedStatus,
+} from "../src/worker/agent-runner";
 
 const TEST_KEY = "worker-test-secret-key-42";
 const RUN_ID = "8a7b6c5d-4e3f-4a2b-9c1d-0e1f2a3b4c5d";
@@ -456,6 +460,32 @@ describe("isolated agent worker", () => {
   );
 
   it(
+    "removes run directories only after verifying cleanup when close fails",
+    { timeout: 30_000 },
+    async () => {
+      const base = await makeBase();
+      const dataDir = join(base, "data");
+      const markersDir = join(base, "markers");
+      const env = workerEnv(dataDir, markersDir, "close-error");
+      const worker = startWorker(env);
+
+      await worker.waitFor("ready");
+      worker.send(startMessage());
+      const result = await worker.waitFor("result");
+      expect(result.type).toBe("result");
+      const exit = await worker.waitForExit(15_000);
+      expect(exit.code).toBe(0);
+
+      const start = await readMarker<{ profileDir: string; workspace: string }>(
+        markersDir,
+        "create.json",
+      );
+      await expect(stat(start.profileDir)).rejects.toThrow();
+      await expect(stat(start.workspace)).rejects.toThrow();
+    },
+  );
+
+  it(
     "cancels a hanging mocked run and still closes the browser",
     { timeout: 30_000 },
     async () => {
@@ -829,4 +859,30 @@ describe("isolated agent worker", () => {
       expect(await pathExists(create.profileDir)).toBe(false);
     },
   );
+});
+
+describe("worker origin guard", () => {
+  const origin = "http://127.0.0.1:3000";
+
+  it("allows only the configured origin and port", () => {
+    expect(blockedOriginInCode(`await page.goto("${origin}/shop")`, origin)).toBeNull();
+    expect(
+      blockedOriginInCode(`await page.goto("http://127.0.0.1:3001/")`, origin),
+    ).toContain("127.0.0.1:3001");
+    expect(
+      blockedOriginInCode(`await page.goto("https://127.0.0.1:3000/")`, origin),
+    ).not.toBeNull();
+    expect(
+      blockedOriginInCode(`await page.goto("//127.0.0.1:3001/x")`, origin),
+    ).not.toBeNull();
+    expect(blockedOriginInCode(`fetch("http://example.com")`, origin)).not.toBeNull();
+  });
+});
+
+describe("worker cleanup gate", () => {
+  it("allows directory removal only for verified owned-process cleanup", () => {
+    expect(cleanupVerifiedStatus("terminated")).toBe(true);
+    expect(cleanupVerifiedStatus("already-gone")).toBe(true);
+    expect(cleanupVerifiedStatus("escaped")).toBe(false);
+  });
 });

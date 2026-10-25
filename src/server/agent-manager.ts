@@ -14,6 +14,7 @@ import {
   AGENT_WORKER_MAX_HEARTBEAT_MS,
   agentRunLimitsSchema,
   agentWorkerMessageSchema,
+  customAgentTaskMaxChars,
   type AgentRunLimits,
   type AgentWorkerEventMessage,
   type AgentWorkerResultMessage,
@@ -137,6 +138,7 @@ export const AGENT_STATUS_RECOVERY_LIMIT = 20;
 export interface AgentRecoveryStatus {
   readonly status: "reconciled" | "skipped" | "failed";
   readonly finishedAt: string;
+  readonly message: string | null;
   readonly corruptRuns: number;
   readonly unresolvedCount: number;
   readonly unresolved: ReadonlyArray<{
@@ -492,10 +494,13 @@ export async function loadAgentStatus(
   const unresolved = (report?.runs ?? []).filter(
     (entry) => entry.outcome === "skipped" || entry.outcome === "escaped",
   );
-  // The on-disk run record keeps the full baseline for evaluation; status and
-  // SSE summaries do not need the ID array and must stay bounded.
+  // The on-disk run record keeps the full baseline and worker identity for
+  // evaluation and recovery; status and SSE summaries do not need them and
+  // must stay bounded.
   const runs = listed.runs.map((run) =>
-    run.formBaseline === null ? run : { ...run, formBaseline: null },
+    run.formBaseline === null && run.worker === null
+      ? run
+      : { ...run, formBaseline: null, worker: null },
   );
   return {
     activeRunId: getActiveAgentRunId(storage.root),
@@ -506,6 +511,7 @@ export async function loadAgentStatus(
       ? {
           status: report.status,
           finishedAt: report.finishedAt,
+          message: report.message ?? null,
           corruptRuns: report.corruptRuns,
           unresolvedCount: unresolved.length,
           unresolved: unresolved
@@ -707,10 +713,11 @@ export async function startAgentRun(
     // Custom instructions do not carry an origin. Without it the browser
     // starts blank and the model has no port or trusted URL to open.
     const prefix = `Start at ${config.origin}.`;
-    if (task.length + prefix.length + 1 > AGENT_WORKER_MAX_TASK_CHARS) {
+    const maxCustomChars = customAgentTaskMaxChars(config.origin);
+    if (task.length > maxCustomChars) {
       return {
         status: "invalid-request",
-        message: "The task plus the application start URL exceeds the task length cap.",
+        message: `The agent task must be 1 to ${maxCustomChars} characters for the configured origin (the origin instruction counts toward the ${AGENT_WORKER_MAX_TASK_CHARS}-character worker cap).`,
       };
     }
     task = `${prefix}\n${task}`;
@@ -871,6 +878,7 @@ export async function startAgentRun(
     evaluation: { status: "not_evaluated", reason: null },
     uiEvidence: "unverified",
     navigationObserved: false,
+    interactionObserved: false,
     finalUrl: null,
     worker: null,
     eventCount: 0,
@@ -1203,6 +1211,7 @@ export async function startAgentRun(
     record.vision = record.imageInputObserved ? "observed" : "unverified";
     record.uiEvidence = message.pageActionObserved ? "observed" : "unverified";
     record.navigationObserved = message.navigationObserved;
+    record.interactionObserved = message.interactionObserved === true;
     record.finalUrl = message.finalUrl;
     const endedAt = now().toISOString();
     record.endedAt = endedAt;

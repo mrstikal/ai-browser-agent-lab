@@ -23,6 +23,7 @@ function summary(overrides: Partial<AgentRunSummary> = {}): AgentRunSummary {
     usage: null,
     evaluation: { status: "passed", reason: null },
     uiEvidence: "observed",
+    pageEvidence: "observed",
     vision: "unverified",
     uiMode: "classic",
     errorSummary: null,

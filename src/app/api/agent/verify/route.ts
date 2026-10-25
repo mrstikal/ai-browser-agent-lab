@@ -1,7 +1,10 @@
 import { z } from "zod";
 import { verifyAgentModel } from "@/server/agent-verification";
 import { AgentCompatibilityError } from "@/server/agent-compatibility";
-import { AgentRunCorruptionError } from "@/server/agent-runs";
+import {
+  AgentRunCorruptionError,
+  stripAgentRunBaseline,
+} from "@/server/agent-runs";
 import { CredentialError } from "@/server/credentials";
 import { ModelSettingsCorruptionError } from "@/server/model-settings";
 import { readGuardedMutation } from "@/server/mutation-guard";
@@ -68,7 +71,7 @@ export async function POST(request: Request) {
   switch (result.status) {
     case "started":
       return Response.json(
-        { ok: true, run: result.run },
+        { ok: true, run: stripAgentRunBaseline(result.run) },
         { status: 200, headers: { "cache-control": "no-store" } },
       );
     case "run-active":
@@ -112,6 +115,6 @@ export async function POST(request: Request) {
     case "invalid-request":
       return failure(400, "invalid-request", result.message);
     case "failed":
-      return failure(500, "worker-failed", result.message, { run: result.run });
+      return failure(500, "worker-failed", result.message, { run: stripAgentRunBaseline(result.run) });
   }
 }

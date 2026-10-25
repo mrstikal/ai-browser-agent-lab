@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { AgentGate } from "@/server/agent-manager";
 import type { AgentRunRecord } from "@/server/agent-runs";
-import { pickAgentDashboardView } from "@/lib/agent-dashboard-view";
+import {
+  buildAgentStatusPayload,
+  pickAgentDashboardView,
+} from "@/lib/agent-dashboard-view";
 import {
   describeExecutionStatus,
   describeGateBlocker,
@@ -48,6 +51,9 @@ function makeRun(overrides: Partial<AgentRunRecord> = {}): AgentRunRecord {
     vision: "unverified",
     evaluation: { status: "not_evaluated", reason: null },
     uiEvidence: "unverified",
+    navigationObserved: true,
+    interactionObserved: true,
+    finalUrl: "http://127.0.0.1:3000/shop",
     worker: null,
     eventCount: 0,
     lastSeq: 0,
@@ -234,6 +240,42 @@ describe("overall task result", () => {
     expect(describeOverallTaskResult(run)).toMatchObject({
       label: "Full task pass",
       tone: "success",
+      fullPass: true,
+    });
+  });
+
+  it("requires page-specific UI evidence for catalog and form presets", () => {
+    const catalog = makeRun({
+      presetId: "catalog-cheapest-home",
+      evaluation: { status: "passed", reason: "Matched." },
+      uiEvidence: "observed",
+      navigationObserved: false,
+      finalUrl: "http://127.0.0.1:3000/shop",
+    });
+    expect(describeOverallTaskResult(catalog)).toMatchObject({
+      label: "Business result passed; UI evidence incomplete",
+      fullPass: false,
+    });
+    const form = makeRun({
+      presetId: "form-support-request",
+      evaluation: { status: "passed", reason: "Matched." },
+      uiEvidence: "observed",
+      interactionObserved: false,
+      finalUrl: "http://127.0.0.1:3000/forms/support",
+    });
+    expect(describeOverallTaskResult(form)).toMatchObject({
+      label: "Business result passed; UI evidence incomplete",
+      fullPass: false,
+    });
+    const formPass = makeRun({
+      presetId: "form-support-request",
+      evaluation: { status: "passed", reason: "Matched." },
+      uiEvidence: "observed",
+      interactionObserved: true,
+      finalUrl: "http://127.0.0.1:3000/forms/support",
+    });
+    expect(describeOverallTaskResult(formPass)).toMatchObject({
+      label: "Full task pass",
       fullPass: true,
     });
   });
@@ -473,5 +515,56 @@ describe("dashboard view", () => {
     expect(view.activeRun).toBeNull();
     expect(view.latestTask).not.toBeNull();
     expect(view.latestVerification).toBeNull();
+  });
+});
+
+describe("agent status payload", () => {
+  it("keeps older runs bounded and exposes the recovery report", () => {
+    const older = makeRun({
+      runId: "22222222-2222-4222-8222-222222222222",
+      task: "OLDER-PRIVATE-PROMPT",
+      startedAt: "2026-10-24T09:00:00.000Z",
+      endedAt: "2026-10-24T09:00:05.000Z",
+    });
+    const latest = makeRun({
+      runId: "33333333-3333-4333-8333-333333333333",
+      task: "Latest task",
+      startedAt: "2026-10-24T10:00:00.000Z",
+      endedAt: "2026-10-24T10:00:05.000Z",
+    });
+    const recovery = {
+      status: "reconciled" as const,
+      finishedAt: "2026-10-24T10:01:00.000Z",
+      message: null,
+      corruptRuns: 0,
+      unresolvedCount: 1,
+      unresolved: [
+        {
+          runId: older.runId,
+          previousStatus: "interrupted" as const,
+          outcome: "skipped" as const,
+          reason: "unverifiable",
+          signals: [],
+          memberPids: [],
+          remainingPids: [],
+          lock: "held" as const,
+          message: "Manual cleanup required.",
+        },
+      ],
+    };
+    const payload = buildAgentStatusPayload({
+      gate: makeGate(),
+      activeRunId: null,
+      runs: [latest, older],
+      corruptRuns: 0,
+      recovery,
+    });
+    expect(payload.view.history).toHaveLength(2);
+    expect(payload.view.history[0]?.runId).toBe(latest.runId);
+    expect(payload.view.latestTask?.task).toBe("Latest task");
+    expect(payload.view.recovery).toEqual(recovery);
+    expect(JSON.stringify(payload)).not.toContain("OLDER-PRIVATE-PROMPT");
+    expect(payload.view.history[1]).not.toHaveProperty("task");
+    expect(payload.view.history[1]).not.toHaveProperty("outputText");
   });
 });

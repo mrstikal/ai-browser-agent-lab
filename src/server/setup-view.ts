@@ -74,7 +74,7 @@ export async function loadSetupView(
   let key: SetupViewKey;
   let keyValue: string | undefined;
   try {
-    const status = await getKeyStatus(env);
+    const status = await getKeyStatus(env, { sweepTemps: false });
     keyValue = await loadOpenRouterKey(env);
     key = { ...status, error: null };
   } catch {

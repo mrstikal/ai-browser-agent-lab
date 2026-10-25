@@ -220,6 +220,24 @@ describe("OpenRouter key validation", () => {
     ).toMatchObject({ status: "valid", managementOnly: true });
   });
 
+  it("requires a strict HTTP 200 for key validation", async () => {
+    const accepted = await startMock((_request, response) =>
+      json(response, 202, { data: { label: "accepted" } }),
+    );
+    expect(
+      await validateOpenRouterKey("sk-or-v1-accepted", {
+        env: accepted.env,
+      }),
+    ).toMatchObject({ status: "invalid-response", httpStatus: 202 });
+
+    const created = await startMock((_request, response) =>
+      json(response, 201, { data: {} }),
+    );
+    expect(
+      await validateOpenRouterKey("sk-or-v1-created", { env: created.env }),
+    ).toMatchObject({ status: "invalid-response", httpStatus: 201 });
+  });
+
   it("distinguishes 401, other 4xx, 5xx, network, and timeout failures", async () => {
     const unauthorized = await startMock((_request, response) => {
       json(response, 401, { error: { message: "Invalid credentials" } });

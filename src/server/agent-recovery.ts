@@ -7,8 +7,10 @@ import {
 import { getActiveAgentRunId } from "./agent-manager";
 import {
   AGENT_RUN_VERSION,
+  AgentRunCorruptionError,
   agentRunLifecycleSchema,
   isActiveAgentRunStatus,
+  isTerminalAgentRunStatus,
   listActiveAgentRuns,
   loadAgentRun,
   saveAgentRun,
@@ -54,7 +56,9 @@ export type AgentRecoveryLock = z.infer<typeof agentRecoveryLockSchema>;
 
 export const agentRecoveryRunSchema = z.strictObject({
   runId: z.uuid(),
-  previousStatus: agentRunLifecycleSchema,
+  // `null` means the record could not be read, so its original lifecycle is
+  // unknown. The entry still carries the unresolved barrier obligation.
+  previousStatus: agentRunLifecycleSchema.nullable(),
   outcome: agentRecoveryOutcomeSchema,
   reason: z.string().max(200).nullable(),
   signals: z.array(z.enum(["SIGTERM", "SIGKILL"])),
@@ -218,10 +222,15 @@ export async function recoverInterruptedAgentState(
   const now = options.now ?? (() => new Date());
   const active = await listActiveAgentRuns(storage);
   const runs: AgentRecoveryRunReport[] = [];
+  const processed = new Set<string>();
+  const previous = await loadAgentRecoveryReport(storage);
   // A result is persisted before the worker closes its browser. If the server
   // dies in that window, the run is already terminal but still owns the paid
   // lock and a live process group. The lock is the durable pointer to that
-  // cleanup obligation, independent of the run's execution status.
+  // cleanup obligation, independent of the run's execution status. This must
+  // cover failed and interrupted runs too: a crash can land after the terminal
+  // status was persisted but before the supervisor recorded an unresolved
+  // group, so the unresolved-report retry path has no entry yet.
   const cleanupOnly: AgentRunRecord[] = [];
   try {
     const metadata = await readLockMetadata(storage.path(PAID_JOB_LOCK_SEGMENTS));
@@ -230,11 +239,49 @@ export async function recoverInterruptedAgentState(
       getActiveAgentRunId(storage.root) !== metadata.ownerId &&
       !active.runs.some((run) => run.runId === metadata.ownerId)
     ) {
-      const run = await loadAgentRun(storage, metadata.ownerId);
-      // Only a completed run is in the post-result cleanup window. Interrupted
-      // and failed terminal runs are owned by the unresolved-report retry path.
-      if (run && run.status === "completed") {
-        cleanupOnly.push(run);
+      let run: AgentRunRecord | undefined;
+      let unknownReason: "record-missing" | "record-unreadable" | null = null;
+      try {
+        run = await loadAgentRun(storage, metadata.ownerId);
+        if (!run) unknownReason = "record-missing";
+      } catch (error) {
+        if (!(error instanceof AgentRunCorruptionError)) throw error;
+        unknownReason = "record-unreadable";
+      }
+      if (run && isTerminalAgentRunStatus(run.status)) {
+        // A run with an unresolved-report entry is owned by the retry loop,
+        // which inspects the group and backfills its evaluation. Runs without
+        // an entry are in the crash window between terminal persistence and
+        // unresolved-group recording, so inspect them here.
+        const hasRetryEntry =
+          previous?.runs.some(
+            (entry) =>
+              entry.runId === run.runId &&
+              (entry.outcome === "skipped" || entry.outcome === "escaped"),
+          ) ?? false;
+        if (!hasRetryEntry) cleanupOnly.push(run);
+      } else if (unknownReason !== null) {
+        // The lock points at a run we cannot read. Keeping the stale lock file
+        // is not enough: the next acquireLock would reclaim it. Reclaim it
+        // under this live process and report the manual-cleanup obligation.
+        const lock = await holdAgentLockForManualCleanup(
+          storage,
+          metadata.ownerId,
+        );
+        processed.add(metadata.ownerId);
+        runs.push({
+          runId: metadata.ownerId,
+          previousStatus: null,
+          outcome: "skipped",
+          reason: unknownReason,
+          signals: [],
+          memberPids: [],
+          remainingPids: [],
+          lock,
+          message: boundedMessage(
+            `The paid lock references agent run ${metadata.ownerId}, but its record is ${unknownReason === "record-missing" ? "missing" : "unreadable"}. The paid barrier is held until the record is restored or the run's processes are cleaned up manually (lock ${lock}).`,
+          ),
+        });
       }
     }
   } catch (error) {
@@ -318,7 +365,6 @@ export async function recoverInterruptedAgentState(
     message: boundedMessage(message),
   });
 
-  const processed = new Set<string>();
   for (const run of active.runs) {
     if (getActiveAgentRunId(storage.root) === run.runId) continue;
     processed.add(run.runId);
@@ -353,6 +399,24 @@ export async function recoverInterruptedAgentState(
     const termination = run.worker
       ? await inspect(run)
       : ({ status: "already-gone" } as AgentGroupTermination);
+    // This branch covers the crash window between terminal persistence and the
+    // settle hook. A preset run can therefore be terminal with no persisted
+    // evaluation. Persist the backfill while the paid lock is still held: the
+    // lock is the only durable pointer to this run, so releasing it first
+    // would make a crash in this gap lose the verdict permanently.
+    if (
+      (termination.status === "terminated" ||
+        termination.status === "already-gone") &&
+      run.kind === "task" &&
+      run.presetId !== null &&
+      run.evaluation.status === "not_evaluated"
+    ) {
+      await saveAgentRun(storage, {
+        ...run,
+        evaluation: await evaluatePresetTaskRun(run, storage),
+        updatedAt: now().toISOString(),
+      });
+    }
     const lock = await settleGroup(run, termination);
     const message =
       termination.status === "terminated" || termination.status === "already-gone"
@@ -364,7 +428,6 @@ export async function recoverInterruptedAgentState(
   // Uncertain groups from earlier boots stay quarantined: retry them so the
   // paid lock remains a real barrier across restarts and is cleared only once
   // the group is proven gone.
-  const previous = await loadAgentRecoveryReport(storage);
   for (const entry of previous?.runs ?? []) {
     if (entry.outcome !== "skipped" && entry.outcome !== "escaped") continue;
     if (processed.has(entry.runId)) continue;
@@ -372,40 +435,74 @@ export async function recoverInterruptedAgentState(
     try {
       run = await loadAgentRun(storage, entry.runId);
     } catch {
-      // The record is unreadable; keep the unresolved entry for a later boot
-      // instead of dropping the barrier knowledge.
+      // The record is unreadable; keep the unresolved entry and make sure the
+      // paid barrier is held by a live process, not just a stale lock file.
       console.error(
         `[agent-recovery] Unresolved run ${entry.runId} still has an unreadable record; keeping its barrier entry.`,
       );
-      runs.push(entry);
+      const lock = await holdAgentLockForManualCleanup(storage, entry.runId);
+      runs.push({
+        ...entry,
+        lock,
+        message: boundedMessage(
+          `The run record is unreadable. The paid barrier is held until the record is restored or the run's processes are cleaned up manually (lock ${lock}).`,
+        ),
+      });
       continue;
     }
-    if (!run || isActiveAgentRunStatus(run.status)) continue;
+    if (!run) {
+      // A missing record is not proof that the recorded process group is gone.
+      // Dropping the entry would erase the only persisted cleanup obligation,
+      // so keep it and hold the barrier under this live process.
+      console.error(
+        `[agent-recovery] Unresolved run ${entry.runId} has no run record; keeping its barrier entry.`,
+      );
+      const lock = await holdAgentLockForManualCleanup(storage, entry.runId);
+      runs.push({
+        ...entry,
+        lock,
+        message: boundedMessage(
+          `The run record is missing. The paid barrier is held until the record is restored or the run's processes are cleaned up manually (lock ${lock}).`,
+        ),
+      });
+      continue;
+    }
+    if (isActiveAgentRunStatus(run.status)) continue;
     const termination = await inspect(run);
+    const gone =
+      termination.status === "terminated" ||
+      termination.status === "already-gone";
+    let evaluation = run.evaluation;
+    if (
+      gone &&
+      run.kind === "task" &&
+      run.presetId !== null &&
+      run.evaluation.status === "not_evaluated"
+    ) {
+      // Persist the backfill before releasing the paid lock; the lock is the
+      // durable pointer that lets a later boot retry if this write fails.
+      evaluation = await evaluatePresetTaskRun(run, storage);
+      await saveAgentRun(storage, {
+        ...run,
+        evaluation,
+        updatedAt: now().toISOString(),
+      });
+    }
     const lock = await settleGroup(run, termination);
     const message = terminationMessage(termination, run.runId);
-    if (
-      termination.status === "terminated" ||
-      termination.status === "already-gone"
-    ) {
+    if (gone) {
       const endedAt = now().toISOString();
       const updated: AgentRunRecord = {
         ...run,
-        error: boundedMessage(
-          `${run.error ?? "The run was interrupted."} Manual cleanup is no longer needed; the worker process group is gone.`,
-        ),
+        error:
+          run.status === "completed"
+            ? run.error
+            : boundedMessage(
+                `${run.error ?? "The run was interrupted."} Manual cleanup is no longer needed; the worker process group is gone.`,
+              ),
+        evaluation,
         updatedAt: endedAt,
       };
-      // Backfill a preset task that became terminal in an earlier build whose
-      // recovery path did not yet evaluate it. The once-only check preserves
-      // any existing evaluation.
-      if (
-        updated.kind === "task" &&
-        updated.presetId !== null &&
-        updated.evaluation.status === "not_evaluated"
-      ) {
-        updated.evaluation = await evaluatePresetTaskRun(updated, storage);
-      }
       await saveAgentRun(storage, updated);
     }
     runs.push({

@@ -155,7 +155,7 @@ export async function loadImageProgress(
 
   let keyAvailable = false;
   try {
-    keyAvailable = (await getKeyStatus(env)).keyAvailable;
+    keyAvailable = (await getKeyStatus(env, { sweepTemps: false })).keyAvailable;
   } catch {
     keyAvailable = false;
   }

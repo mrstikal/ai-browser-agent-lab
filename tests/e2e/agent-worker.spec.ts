@@ -73,18 +73,22 @@ test("the Verify Agent Model action stamps the fixed Shop heading run", async ({
   const before = await request.get("/api/agent/status");
   expect(before.status()).toBe(200);
   const beforeBody = (await before.json()) as {
-    activeRunId: string | null;
-    gate: { keyAvailable: boolean; verified: boolean; reason: string };
-    runs: Array<{ status: string }>;
+    view: {
+      activeRunId: string | null;
+      gate: { keyAvailable: boolean; verified: boolean; reason: string };
+      history: Array<{ status: string }>;
+    };
   };
-  expect(beforeBody.gate).toMatchObject({
+  expect(beforeBody.view.gate).toMatchObject({
     keyAvailable: true,
     verified: false,
     reason: "verification-required",
   });
-  expect(beforeBody.activeRunId).toBeNull();
+  expect(beforeBody.view.activeRunId).toBeNull();
   // A retried attempt may leave completed runs behind; none may be active.
-  expect(beforeBody.runs.every((run) => run.status !== "running")).toBe(true);
+  expect(
+    beforeBody.view.history.every((run) => run.status !== "running"),
+  ).toBe(true);
 
   await page.goto("/agent");
   await expect(page.getByTestId("verification-cost-warning")).toContainText(
@@ -128,12 +132,18 @@ test("the Verify Agent Model action stamps the fixed Shop heading run", async ({
 
   const after = await request.get("/api/agent/status");
   const afterBody = (await after.json()) as {
-    gate: { verified: boolean; vision: string };
-    runs: Array<{ kind: string; evaluation: { status: string } }>;
+    view: {
+      gate: { verified: boolean; vision: string };
+      history: Array<{ kind: string; evaluation: { status: string } }>;
+    };
   };
-  expect(afterBody.gate).toMatchObject({ verified: true, vision: "unverified" });
+  expect(afterBody.view.gate).toMatchObject({
+    verified: true,
+    vision: "unverified",
+  });
   expect(
-    afterBody.runs.find((run) => run.kind === "verification")?.evaluation.status,
+    afterBody.view.history.find((run) => run.kind === "verification")
+      ?.evaluation.status,
   ).toBe("passed");
   expect(JSON.stringify(afterBody)).not.toContain(TEST_KEY);
 });
@@ -289,17 +299,13 @@ test("history keeps persisted runs, honest usage, and historical traces", async 
   const statusResponse = await request.get("/api/agent/status");
   expect(statusResponse.status()).toBe(200);
   const statusBody = (await statusResponse.json()) as {
-    runs: Array<{ runId: string; kind: string; task: string }>;
+    view: { history: Array<{ runId: string; kind: string }> };
   };
-  const xssRun = statusBody.runs.find(
-    (run) => run.kind === "task" && run.task.includes("[[xss]]"),
+  const taskRuns = statusBody.view.history.filter(
+    (run) => run.kind === "task",
   );
-  const latestRun = statusBody.runs.find(
-    (run) =>
-      run.kind === "task" &&
-      run.task ===
-        `Start at ${baseURL}.\nRead the main heading after history check.`,
-  );
+  const latestRun = taskRuns[0];
+  const xssRun = taskRuns[1];
   if (!xssRun || !latestRun) {
     throw new Error("The history test runs were not persisted.");
   }
@@ -526,6 +532,9 @@ test("resilience comparison counts samples and requires confirmation for live re
     vision: "unverified",
     evaluation: { status: "passed", reason: "Seeded pass." },
     uiEvidence: "observed",
+    navigationObserved: true,
+    interactionObserved: true,
+    finalUrl: `${baseURL}/shop`,
     worker: null,
     eventCount: 0,
     lastSeq: 0,
@@ -685,12 +694,10 @@ test("dashboard refuses a duplicate run and renders cancellation", async ({
   const statusResponse = await request.get("/api/agent/status");
   expect(statusResponse.status()).toBe(200);
   const statusBody = (await statusResponse.json()) as {
-    runs: Array<{ runId: string; kind: string; task: string }>;
+    view: { history: Array<{ runId: string; kind: string }> };
   };
-  const cancelledRun = statusBody.runs.find(
-    (run) =>
-      run.kind === "task" &&
-      run.task === `Start at ${baseURL}.\nHold the run [[cancel]]`,
+  const cancelledRun = statusBody.view.history.find(
+    (run) => run.kind === "task",
   );
   if (!cancelledRun) {
     throw new Error("The cancelled run was not persisted.");
@@ -826,14 +833,18 @@ test("a mocked supervised run works beside the dev server", async ({
     const before = await request.get("/api/agent/status");
     expect(before.status()).toBe(200);
     const beforeBody = (await before.json()) as {
-      activeRunId: string | null;
-      gate: { keyAvailable: boolean; verified: boolean };
-      runs: Array<{ status: string }>;
+      view: {
+        activeRunId: string | null;
+        gate: { keyAvailable: boolean; verified: boolean };
+        history: Array<{ status: string }>;
+      };
     };
-    expect(beforeBody.gate.keyAvailable).toBe(true);
-    expect(beforeBody.gate.verified).toBe(true);
-    expect(beforeBody.activeRunId).toBeNull();
-    expect(beforeBody.runs.every((run) => run.status !== "running")).toBe(true);
+    expect(beforeBody.view.gate.keyAvailable).toBe(true);
+    expect(beforeBody.view.gate.verified).toBe(true);
+    expect(beforeBody.view.activeRunId).toBeNull();
+    expect(
+      beforeBody.view.history.every((run) => run.status !== "running"),
+    ).toBe(true);
 
     const started = await request.post("/api/agent/runs", {
       data: { task: "Read the main heading." },
@@ -863,11 +874,12 @@ test("a mocked supervised run works beside the dev server", async ({
         async () => {
           const response = await request.get("/api/agent/status");
           const body = (await response.json()) as {
-            runs: Array<{ runId: string; status: string }>;
+            view: { history: Array<{ runId: string; status: string }> };
           };
           return (
-            body.runs.find((run) => run.runId === startedBody.run.runId)
-              ?.status ?? "missing"
+            body.view.history.find(
+              (run) => run.runId === startedBody.run.runId,
+            )?.status ?? "missing"
           );
         },
         { timeout: 30_000, intervals: [100, 250, 500] },
@@ -878,8 +890,10 @@ test("a mocked supervised run works beside the dev server", async ({
       .poll(
         async () => {
           const response = await request.get("/api/agent/status");
-          const body = (await response.json()) as { activeRunId: string | null };
-          return body.activeRunId;
+          const body = (await response.json()) as {
+            view: { activeRunId: string | null };
+          };
+          return body.view.activeRunId;
         },
         { timeout: 15_000, intervals: [100, 250, 500] },
       )
@@ -888,21 +902,22 @@ test("a mocked supervised run works beside the dev server", async ({
     const after = await request.get("/api/agent/status");
     expect(after.status()).toBe(200);
     const afterBody = (await after.json()) as {
-      activeRunId: string | null;
-      runs: Array<{
-        runId: string;
-        status: string;
-        stopReason: string | null;
-        steps: number | null;
-        outputText: string | null;
-        evaluation: { status: string };
-        uiEvidence: string;
-      }>;
+      view: {
+        activeRunId: string | null;
+        latestTask: {
+          runId: string;
+          status: string;
+          stopReason: string | null;
+          steps: number | null;
+          outputText: string | null;
+          evaluation: { status: string };
+          uiEvidence: string;
+        } | null;
+      };
     };
-    const run = afterBody.runs.find(
-      (candidate) => candidate.runId === startedBody.run.runId,
-    );
+    const run = afterBody.view.latestTask;
     expect(run).toMatchObject({
+      runId: startedBody.run.runId,
       status: "completed",
       stopReason: "completed",
       steps: 3,
@@ -910,7 +925,7 @@ test("a mocked supervised run works beside the dev server", async ({
       evaluation: { status: "not_evaluated" },
       uiEvidence: "observed",
     });
-    expect(afterBody.activeRunId).toBeNull();
+    expect(afterBody.view.activeRunId).toBeNull();
     expect(JSON.stringify(afterBody)).not.toContain(TEST_KEY);
   } finally {
     // Cleanup must not mask the primary assertion if the run is still active:

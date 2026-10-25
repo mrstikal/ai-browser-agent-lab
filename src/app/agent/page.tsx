@@ -6,7 +6,7 @@ import {
   AGENT_RUN_MAX_COST_USD,
   AGENT_RUN_MAX_STEPS,
   AGENT_RUN_MAX_TIMEOUT_MS,
-  AGENT_WORKER_MAX_TASK_CHARS,
+  customAgentTaskMaxChars,
 } from "@/lib/agent-ipc";
 import {
   pickAgentDashboardView,
@@ -95,7 +95,7 @@ export default async function AgentPage() {
             maxTimeoutMs: AGENT_RUN_MAX_TIMEOUT_MS,
             maxCostUsd: AGENT_RUN_MAX_COST_USD,
           }}
-          maxTaskChars={AGENT_WORKER_MAX_TASK_CHARS}
+          maxTaskChars={customAgentTaskMaxChars(view.gate.origin)}
         />
       ) : null}
 

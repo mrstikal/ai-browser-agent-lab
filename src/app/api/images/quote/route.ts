@@ -29,7 +29,7 @@ export async function POST(request: Request): Promise<Response> {
   let keyAvailable: boolean;
   let apiKey: string | undefined;
   try {
-    keyAvailable = (await getKeyStatus()).keyAvailable;
+    keyAvailable = (await getKeyStatus(undefined, { sweepTemps: false })).keyAvailable;
     apiKey = await loadOpenRouterKey();
   } catch {
     return failure(409, "key-required", "The stored key is unreadable.");

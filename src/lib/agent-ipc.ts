@@ -36,6 +36,16 @@ export const AGENT_WORKER_MAX_OUTPUT_CHARS = 20_000;
 export const AGENT_WORKER_MAX_ERROR_CHARS = 2_000;
 export const AGENT_WORKER_MAX_TASK_CHARS = 4_000;
 
+/**
+ * The worker cap applies to the full task text, including the origin prefix
+ * the server adds for custom tasks. Expose the effective custom-task budget so
+ * the UI never advertises a length the server must reject.
+ */
+export function customAgentTaskMaxChars(origin: string): number {
+  const prefix = `Start at ${origin}.`;
+  return Math.max(1, AGENT_WORKER_MAX_TASK_CHARS - prefix.length - 1);
+}
+
 /** SDK stop reasons plus a completed run; kept in the SDK's own spelling. */
 export const AGENT_RUN_STATUSES = [
   "completed",
@@ -160,6 +170,8 @@ export const agentWorkerResultMessageSchema = z.strictObject({
   imageInputObserved: z.boolean(),
   pageActionObserved: z.boolean(),
   navigationObserved: z.boolean(),
+  /** Click/Type interaction; optional only for protocol compatibility. */
+  interactionObserved: z.boolean().optional(),
   finalUrl: z.string().max(300).nullable(),
 });
 export type AgentWorkerResultMessage = z.infer<

@@ -486,6 +486,44 @@ describe("browser-based model verification", () => {
   );
 
   it(
+    "does not stamp when the terminal record or its evaluation is not durable",
+    { timeout: 30_000 },
+    async () => {
+      const context = await makeContext("success");
+      await seedKey(context);
+      const currentKey = await loadOpenRouterKey(context.env);
+      const sdkVersion = await readInstalledSdkVersion();
+      const record = makeRecord({ origin: context.origin });
+      const settler = buildVerificationSettler({
+        storage: context.storage,
+        env: context.env,
+        repoRoot: process.cwd(),
+        keyBefore: currentKey,
+        sdkVersionBefore: sdkVersion,
+      });
+
+      const missingOutcome = await settler(record);
+      expect(missingOutcome).toMatchObject({ stamped: false });
+      expect(missingOutcome.skipReason).toMatch(/could not be persisted/);
+      expect(await loadAgentCompatibility(context.storage)).toBeUndefined();
+
+      await saveAgentRun(context.storage, {
+        ...record,
+        status: "running",
+        stopReason: null,
+        endedAt: null,
+      });
+      const runningOutcome = await settler(record);
+      expect(runningOutcome).toMatchObject({ stamped: false });
+      expect(runningOutcome.skipReason).toMatch(/could not be persisted/);
+      expect(await loadAgentCompatibility(context.storage)).toBeUndefined();
+      expect(
+        (await loadAgentRun(context.storage, record.runId))?.evaluation.status,
+      ).toBe("not_evaluated");
+    },
+  );
+
+  it(
     "does not stamp when the origin or installed SDK no longer matches the run",
     { timeout: 30_000 },
     async () => {

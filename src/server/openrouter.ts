@@ -453,6 +453,11 @@ export async function validateOpenRouterKey(
     }
     return result("invalid-response", { httpStatus: 200 });
   }
+  // The key-validation contract is a strict 200 response. A 2xx other than
+  // 200 is not a valid validation answer even if the body looks plausible.
+  if (fetched.status !== 200) {
+    return result("invalid-response", { httpStatus: fetched.status });
+  }
 
   const parsed = fetched.json;
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {

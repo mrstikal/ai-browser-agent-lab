@@ -22,7 +22,10 @@ export function ConfirmEstimateForm({
   startingBalanceWorstCaseUsd,
 }: ConfirmEstimateFormProps) {
   const router = useRouter();
-  const [confirmed, setConfirmed] = useState(false);
+  const [confirmedFingerprint, setConfirmedFingerprint] = useState<
+    string | null
+  >(null);
+  const confirmed = confirmedFingerprint === fingerprint;
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -50,7 +53,7 @@ export function ConfirmEstimateForm({
       setError("The estimate could not be confirmed.");
     } finally {
       setBusy(false);
-      setConfirmed(false);
+      setConfirmedFingerprint(null);
     }
   }
 
@@ -76,7 +79,9 @@ export function ConfirmEstimateForm({
         <input
           type="checkbox"
           checked={confirmed}
-          onChange={(event) => setConfirmed(event.target.checked)}
+          onChange={(event) =>
+            setConfirmedFingerprint(event.target.checked ? fingerprint : null)
+          }
           className="mt-0.5"
         />
         I have reviewed the missing images, the current unit price, and the indicative starting

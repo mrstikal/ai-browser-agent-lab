@@ -2,7 +2,6 @@ import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { AgentRunWorker } from "./agent-runs";
 import {
-  parseProcGroupId,
   parseProcStat,
   ProcessIdentityError,
   readBootId,
@@ -108,7 +107,8 @@ async function readProcStatFields(
   try {
     content = await readFile(target, "utf8");
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ESRCH") return undefined;
     throw new ProcessIdentityError(`Cannot read ${target}.`, { cause: error });
   }
   const close = content.lastIndexOf(")");
@@ -119,9 +119,24 @@ async function readProcStatFields(
   const fields = content.slice(close + 1).trim().split(/\s+/);
   const rawPpid = fields[1];
   const ppid = rawPpid !== undefined && /^\d+$/.test(rawPpid) ? Number(rawPpid) : 0;
+  // Group ID 0 is used by kernel/namespace init processes. It can never be
+  // an agent worker group (the worker is spawned detached with pgid = pid),
+  // so it is parsed here instead of being treated as a malformed stat.
+  const rawGroup = fields[2];
+  if (rawGroup === undefined || !/^\d+$/.test(rawGroup)) {
+    throw new ProcessIdentityError(
+      `Malformed ${target}: missing or invalid process group ID.`,
+    );
+  }
+  const groupId = Number(rawGroup);
+  if (!Number.isSafeInteger(groupId) || groupId < 0 || groupId > 2 ** 31 - 1) {
+    throw new ProcessIdentityError(
+      `Malformed ${target}: process group ID is out of range.`,
+    );
+  }
   return {
     procStartTicks: parseProcStat(pid, content),
-    groupId: parseProcGroupId(pid, content),
+    groupId,
     ppid,
     state,
   };
@@ -132,13 +147,19 @@ async function readProcArgv(
   options: ProcOptions,
 ): Promise<readonly string[] | null> {
   const target = join(options.procRoot ?? "/proc", String(pid), "cmdline");
+  let raw: string;
   try {
-    const raw = await readFile(target, "utf8");
-    const argv = raw.split("\u0000").filter((part) => part.length > 0);
-    return argv.length > 0 ? argv : null;
-  } catch {
-    return null;
+    raw = await readFile(target, "utf8");
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    // A process can exit between the stat and cmdline reads. Any other error
+    // means ownership cannot be decided, so fail closed instead of silently
+    // treating a live process as unowned.
+    if (code === "ENOENT" || code === "ESRCH") return null;
+    throw new ProcessIdentityError(`Cannot read ${target}.`, { cause: error });
   }
+  const argv = raw.split("\u0000").filter((part) => part.length > 0);
+  return argv.length > 0 ? argv : null;
 }
 
 /** The exact argv element the real SDK Chromium passes to every helper. */
@@ -170,14 +191,11 @@ export async function readAgentProcessTable(
   for (const name of names) {
     if (!/^\d+$/.test(name)) continue;
     const pid = Number(name);
-    let fields: ProcStatFields | undefined;
-    try {
-      fields = await readProcStatFields(pid, options);
-    } catch {
-      // A process can disappear between readdir and the stat read.
-      continue;
-    }
-    if (!fields || fields.state === "Z") continue;
+    // A process that exits between readdir and the stat read returns
+    // undefined. Any other error is not proof of disappearance: propagate it
+    // so the caller reports an unverifiable group instead of a false "gone".
+    const fields = await readProcStatFields(pid, options);
+    if (!fields || fields.state === "Z" || fields.groupId === 0) continue;
     table.push({
       pid,
       ppid: fields.ppid,

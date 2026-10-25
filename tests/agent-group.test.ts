@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -7,10 +7,12 @@ import {
   agentGroupMemberPids,
   listAgentGroupMembers,
   listOwnedProcesses,
+  readAgentProcessTable,
   terminateAgentWorkerGroup,
 } from "../src/server/agent-group";
 import type { AgentRunWorker } from "../src/server/agent-runs";
 import {
+  ProcessIdentityError,
   readBootId,
   readProcessGroupId,
   readProcessStartTicks,
@@ -456,5 +458,30 @@ describe("agent worker group termination", () => {
     expect(
       await terminateAgentWorkerGroup(identity, { profileDir, ...FAST_GRACES }),
     ).toEqual({ status: "already-gone" });
+  });
+});
+
+describe("agent process table fail-closed behavior", () => {
+  it("propagates an unreadable stat instead of treating the group as gone", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agent-proc-unreadable-"));
+    tempDirs.push(root);
+    await mkdir(join(root, "123"), { recursive: true });
+    await writeFile(join(root, "123", "stat"), "not a proc stat\n");
+    await expect(readAgentProcessTable({ procRoot: root })).rejects.toBeInstanceOf(
+      ProcessIdentityError,
+    );
+  });
+
+  it("ignores namespace init processes whose process group is 0", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agent-proc-init-"));
+    tempDirs.push(root);
+    await mkdir(join(root, "11"), { recursive: true });
+    await writeFile(
+      join(root, "11", "stat"),
+      "11 (init) S 2 0 0 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 4 0 475 5038080 885\n",
+    );
+    await expect(readAgentProcessTable({ procRoot: root })).resolves.toEqual(
+      [],
+    );
   });
 });

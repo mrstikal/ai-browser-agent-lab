@@ -250,6 +250,25 @@ describe("credential lifecycle", () => {
     ).toBeUndefined();
   });
 
+  it("does not sweep temp files from read-only status callers", async () => {
+    const dataDir = await makeDataDir();
+    const env = envFor(dataDir);
+    const storage = new Storage(dataDir);
+    await storage.writeFile(["secrets", ".openrouter-key.readonly.tmp"], "leftover");
+    resetCredentialHolderForTests();
+
+    await getKeyStatus(env, { sweepTemps: false });
+    expect(
+      await storage.readFile(["secrets", ".openrouter-key.readonly.tmp"]),
+    ).toEqual(Buffer.from("leftover"));
+
+    resetCredentialHolderForTests();
+    await getKeyStatus(env);
+    expect(
+      await storage.readFile(["secrets", ".openrouter-key.readonly.tmp"]),
+    ).toBeUndefined();
+  });
+
   it("exposes the crash window between invalidation and the key write", async () => {
     const dataDir = await makeDataDir();
     const env = envFor(dataDir);

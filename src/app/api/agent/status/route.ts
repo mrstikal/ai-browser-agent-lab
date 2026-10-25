@@ -3,6 +3,7 @@ import { AgentCompatibilityError } from "@/server/agent-compatibility";
 import { AgentRunCorruptionError } from "@/server/agent-runs";
 import { ModelSettingsCorruptionError } from "@/server/model-settings";
 import { StorageCorruptionError } from "@/server/storage";
+import { buildAgentStatusPayload } from "@/lib/agent-dashboard-view";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -10,7 +11,7 @@ export const runtime = "nodejs";
 export async function GET(): Promise<Response> {
   try {
     const snapshot = await loadAgentStatus();
-    return Response.json(snapshot, {
+    return Response.json(buildAgentStatusPayload(snapshot), {
       status: 200,
       headers: { "cache-control": "no-store" },
     });

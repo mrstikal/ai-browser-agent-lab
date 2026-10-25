@@ -281,12 +281,12 @@ export const catalogAudioAnswerSchema = z.strictObject({
 export type CatalogAudioAnswer = z.infer<typeof catalogAudioAnswerSchema>;
 
 export const formSupportAnswerSchema = z.strictObject({
-  requestId: z.uuid(),
+  requestId: z.uuid().transform((value) => value.toLowerCase()),
 });
 export type FormSupportAnswer = z.infer<typeof formSupportAnswerSchema>;
 
 export const formInquiryAnswerSchema = z.strictObject({
-  confirmationId: z.uuid(),
+  confirmationId: z.uuid().transform((value) => value.toLowerCase()),
 });
 export type FormInquiryAnswer = z.infer<typeof formInquiryAnswerSchema>;
 

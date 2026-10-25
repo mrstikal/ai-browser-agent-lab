@@ -10,7 +10,12 @@ import {
   invalidateAgentCompatibility,
   saveAgentCompatibility,
 } from "./agent-compatibility";
-import { loadAgentRun, saveAgentRun, type AgentRunRecord } from "./agent-runs";
+import {
+  isTerminalAgentRunStatus,
+  loadAgentRun,
+  saveAgentRun,
+  type AgentRunRecord,
+} from "./agent-runs";
 import { resolveAppConfig } from "./config";
 import { loadOpenRouterKey } from "./credentials";
 import { loadModelSettings } from "./model-settings";
@@ -150,9 +155,19 @@ async function persistEvaluation(
   options: VerificationSettlerOptions,
   record: AgentRunRecord,
   evaluation: AgentVerificationEvaluation,
-): Promise<void> {
+): Promise<boolean> {
+  if (!isTerminalAgentRunStatus(record.status)) return false;
   const current = await loadAgentRun(options.storage, record.runId);
-  if (!current || current.kind !== "verification") return;
+  // A missing record or a still-running record means the terminal write did
+  // not become durable. Attaching an evaluation to it would let the settler
+  // stamp a tuple without the required persisted terminal evidence.
+  if (
+    !current ||
+    current.kind !== "verification" ||
+    !isTerminalAgentRunStatus(current.status)
+  ) {
+    return false;
+  }
   await saveAgentRun(options.storage, {
     ...current,
     evaluation: {
@@ -161,6 +176,7 @@ async function persistEvaluation(
     },
     updatedAt: (options.now?.() ?? new Date()).toISOString(),
   });
+  return true;
 }
 
 interface StampDecision {
@@ -242,9 +258,9 @@ export function buildVerificationSettler(
 ): (record: AgentRunRecord) => Promise<VerificationSettleOutcome> {
   return async (record) => {
     const evaluation = evaluateVerificationRun(record);
-    let evaluationPersisted = true;
+    let evaluationPersisted = false;
     try {
-      await persistEvaluation(options, record, evaluation);
+      evaluationPersisted = await persistEvaluation(options, record, evaluation);
     } catch (error) {
       evaluationPersisted = false;
       console.error(

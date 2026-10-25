@@ -4,9 +4,9 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { guardedJsonFetch } from "@/app/setup/guard-fetch";
 import {
-  pickAgentDashboardView,
+  AGENT_STATUS_VERSION,
   type AgentDashboardView,
-  type AgentStatusLike,
+  type AgentStatusPayload,
 } from "@/lib/agent-dashboard-view";
 import { mergeAgentRunSummary } from "@/lib/agent-history";
 import type { AgentRunLimits } from "@/lib/agent-ipc";
@@ -23,6 +23,7 @@ import {
 } from "@/lib/agent-trace";
 import type { AgentRunRecord } from "@/server/agent-runs";
 import { HistoryPanel } from "./history-panel";
+import { RecoveryPanel } from "./recovery-panel";
 import { ResiliencePanel } from "./resilience-panel";
 import { TaskPanel } from "./task-panel";
 import { TracePanel, type AgentStreamConnection } from "./trace-panel";
@@ -408,13 +409,14 @@ export function AgentDashboard({
         : activeRunTimeoutMs + POLL_SETTLE_SLACK_MS);
     let failures = 0;
 
-    const readStatus = async (): Promise<AgentStatusLike | null> => {
+    const readStatus = async (): Promise<AgentStatusPayload | null> => {
       const response = await fetch("/api/agent/status", {
         cache: "no-store",
         signal: controller.signal,
       });
       if (!response.ok) return null;
-      return (await response.json()) as AgentStatusLike;
+      const payload = (await response.json()) as AgentStatusPayload;
+      return payload.version === AGENT_STATUS_VERSION ? payload : null;
     };
 
     // Read through a function so TypeScript does not carry an earlier
@@ -429,13 +431,16 @@ export function AgentDashboard({
         if (snapshot === null) throw new Error("status unavailable");
         failures = 0;
         setPollError(null);
-        applyView(pickAgentDashboardView(snapshot));
+        applyView(snapshot.view);
+        setCorruptRuns(snapshot.corruptRuns);
         const run =
           pollRunId === null
             ? undefined
-            : snapshot.runs.find((candidate) => candidate.runId === pollRunId);
+            : snapshot.view.history.find(
+                (candidate) => candidate.runId === pollRunId,
+              );
         const settled =
-          snapshot.activeRunId === null &&
+          snapshot.view.activeRunId === null &&
           (pollRunId === null ||
             (run !== undefined && TERMINAL_RUN_STATUSES.has(run.status)));
         if (settled) {
@@ -444,7 +449,8 @@ export function AgentDashboard({
           const finalSnapshot = await readStatus();
           if (cancelled || streamIsLive()) return;
           if (finalSnapshot !== null) {
-            applyView(pickAgentDashboardView(finalSnapshot));
+            applyView(finalSnapshot.view);
+            setCorruptRuns(finalSnapshot.corruptRuns);
           }
           clearPollState();
           return;
@@ -688,6 +694,7 @@ export function AgentDashboard({
           <code>data/agent-runs</code>.
         </p>
       ) : null}
+      <RecoveryPanel recovery={view.recovery} />
       <VerificationPanel
         view={view}
         limits={verificationLimits}

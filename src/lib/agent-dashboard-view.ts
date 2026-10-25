@@ -1,4 +1,7 @@
-import type { AgentGate } from "@/server/agent-manager";
+import type {
+  AgentGate,
+  AgentRecoveryStatus,
+} from "@/server/agent-manager";
 import type { AgentRunRecord } from "@/server/agent-runs";
 import {
   buildAgentHistory,
@@ -18,12 +21,41 @@ export interface AgentDashboardView {
   readonly latestTask: AgentRunRecord | null;
   /** Newest-first, bounded summaries of persisted runs. */
   readonly history: readonly AgentRunSummary[];
+  /** Last startup-recovery report, including manual-cleanup obligations. */
+  readonly recovery: AgentRecoveryStatus | null;
 }
 
 export interface AgentStatusLike {
   readonly gate: AgentGate;
   readonly activeRunId: string | null;
   readonly runs: readonly AgentRunRecord[];
+  readonly recovery?: AgentRecoveryStatus | null;
+}
+
+/**
+ * Client-facing status response. Only the active and latest records travel in
+ * full (the panels render their task/output/error); older runs are represented
+ * by the bounded history summaries.
+ */
+export const AGENT_STATUS_VERSION = 1 as const;
+
+export interface AgentStatusPayload {
+  readonly version: typeof AGENT_STATUS_VERSION;
+  readonly generatedAt: string;
+  readonly view: AgentDashboardView;
+  readonly corruptRuns: number;
+}
+
+export function buildAgentStatusPayload(
+  snapshot: AgentStatusLike & { readonly corruptRuns: number },
+  generatedAt: string = new Date().toISOString(),
+): AgentStatusPayload {
+  return {
+    version: AGENT_STATUS_VERSION,
+    generatedAt,
+    view: pickAgentDashboardView(snapshot),
+    corruptRuns: snapshot.corruptRuns,
+  };
 }
 
 export function pickAgentDashboardView(
@@ -42,6 +74,7 @@ export function pickAgentDashboardView(
       snapshot.runs.find((run) => run.kind === "verification") ?? null,
     latestTask: snapshot.runs.find((run) => run.kind === "task") ?? null,
     history: buildAgentHistory(snapshot.runs),
+    recovery: snapshot.recovery ?? null,
   };
 }
 

@@ -3,13 +3,14 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AGENT_RECOVERY_FILE,
   AGENT_RECOVERY_VERSION,
   loadAgentRecoveryReport,
   recoverInterruptedAgentState,
 } from "../src/server/agent-recovery";
+import { AGENT_RUNS_DIR } from "../src/server/agent-runs";
 import {
   loadAgentRun,
   saveAgentRun,
@@ -147,6 +148,210 @@ async function deadPid(): Promise<number> {
 }
 
 describe("agent restart recovery", () => {
+  it("inspects a failed terminal run still referenced by the paid lock", async () => {
+    const storage = await makeStorage();
+    const runId = randomUUID();
+    const gonePid = await deadPid();
+    await saveAgentRun(
+      storage,
+      runRecord({
+        runId,
+        status: "failed",
+        endedAt: new Date().toISOString(),
+        worker: {
+          pid: gonePid,
+          groupId: gonePid,
+          procStartTicks: 1,
+          bootId: await readBootId(),
+        },
+      }),
+    );
+    await writeStaleLock(storage, runId);
+
+    const report = await recoverInterruptedAgentState({
+      storage,
+      ...FAST_GRACES,
+    });
+
+    expect(report.runs[0]).toMatchObject({
+      runId,
+      previousStatus: "failed",
+      outcome: "already-gone",
+      lock: "released",
+    });
+    expect((await loadAgentRun(storage, runId))?.status).toBe("failed");
+    expect(
+      await storage.readJson<unknown>(PAID_JOB_LOCK_SEGMENTS),
+    ).toBeUndefined();
+  });
+
+  it("backfills a completed preset run that crashed before evaluation", async () => {
+    const storage = await makeStorage();
+    const runId = randomUUID();
+    const gonePid = await deadPid();
+    await saveAgentRun(
+      storage,
+      runRecord({
+        runId,
+        presetId: "catalog-cheapest-home",
+        status: "completed",
+        stopReason: "completed",
+        endedAt: new Date().toISOString(),
+        outputText:
+          '{"name":"Pebble Plant Pot","priceUsd":22,"url":"/shop/products/pebble-plant-pot"}',
+        evaluation: { status: "not_evaluated", reason: null },
+        worker: {
+          pid: gonePid,
+          groupId: gonePid,
+          procStartTicks: 1,
+          bootId: await readBootId(),
+        },
+      }),
+    );
+    await writeStaleLock(storage, runId);
+
+    let lockAtEvaluationWrite: unknown;
+    const originalWriteJson = storage.writeJson.bind(storage);
+    const writeSpy = vi
+      .spyOn(storage, "writeJson")
+      .mockImplementation(async (segments, value) => {
+        const record = value as { evaluation?: { status?: string } };
+        if (
+          segments[0] === AGENT_RUNS_DIR &&
+          segments[1] === `${runId}.json` &&
+          record.evaluation?.status === "passed"
+        ) {
+          lockAtEvaluationWrite =
+            await storage.readJson(PAID_JOB_LOCK_SEGMENTS);
+        }
+        return originalWriteJson(segments, value);
+      });
+
+    try {
+      const report = await recoverInterruptedAgentState({
+        storage,
+        ...FAST_GRACES,
+      });
+
+      expect(report.runs[0]).toMatchObject({
+        runId,
+        previousStatus: "completed",
+        outcome: "already-gone",
+        lock: "released",
+      });
+      expect((await loadAgentRun(storage, runId))?.evaluation.status).toBe(
+        "passed",
+      );
+      // The evaluation must be durable before the paid barrier is dropped.
+      expect(lockAtEvaluationWrite).toMatchObject({ ownerId: runId });
+      expect(
+        await storage.readJson<unknown>(PAID_JOB_LOCK_SEGMENTS),
+      ).toBeUndefined();
+    } finally {
+      writeSpy.mockRestore();
+    }
+  });
+
+  it("inspects an interrupted terminal run still referenced by the paid lock", async () => {
+    const storage = await makeStorage();
+    const runId = randomUUID();
+    const gonePid = await deadPid();
+    await saveAgentRun(
+      storage,
+      runRecord({
+        runId,
+        status: "interrupted",
+        endedAt: new Date().toISOString(),
+        worker: {
+          pid: gonePid,
+          groupId: gonePid,
+          procStartTicks: 1,
+          bootId: await readBootId(),
+        },
+      }),
+    );
+    await writeStaleLock(storage, runId);
+
+    const report = await recoverInterruptedAgentState({
+      storage,
+      ...FAST_GRACES,
+    });
+
+    expect(report.runs[0]).toMatchObject({
+      runId,
+      previousStatus: "interrupted",
+      outcome: "already-gone",
+      lock: "released",
+    });
+    expect((await loadAgentRun(storage, runId))?.status).toBe("interrupted");
+  });
+
+  it("keeps an unresolved obligation when its run record is missing", async () => {
+    const storage = await makeStorage();
+    const runId = randomUUID();
+    await storage.writeJson([AGENT_RECOVERY_FILE], {
+      version: AGENT_RECOVERY_VERSION,
+      finishedAt: new Date().toISOString(),
+      status: "reconciled",
+      corruptRuns: 0,
+      runs: [
+        {
+          runId,
+          previousStatus: "interrupted",
+          outcome: "skipped",
+          reason: "unverifiable",
+          signals: [],
+          memberPids: [],
+          remainingPids: [],
+          lock: "held",
+          message: "The group could not be verified.",
+        },
+      ],
+    });
+
+    const report = await recoverInterruptedAgentState({
+      storage,
+      ...FAST_GRACES,
+    });
+
+    expect(report.runs).toHaveLength(1);
+    expect(report.runs[0]).toMatchObject({ runId, lock: "held" });
+    expect(report.runs[0]?.message).toContain("run record is missing");
+    expect(await loadAgentRecoveryReport(storage)).toMatchObject({
+      runs: [expect.objectContaining({ runId, lock: "held" })],
+    });
+    const lock = await storage.readJson<{ ownerId: string; pid: number }>(
+      PAID_JOB_LOCK_SEGMENTS,
+    );
+    expect(lock).toMatchObject({ ownerId: runId, pid: process.pid });
+  });
+
+  it("holds the paid barrier when the lock references an unreadable run", async () => {
+    const storage = await makeStorage();
+    const runId = randomUUID();
+    await storage.writeFile([AGENT_RUNS_DIR, `${runId}.json`], "{not json");
+    await writeStaleLock(storage, runId);
+
+    const report = await recoverInterruptedAgentState({
+      storage,
+      ...FAST_GRACES,
+    });
+
+    expect(report.corruptRuns).toBe(1);
+    expect(report.runs).toHaveLength(1);
+    expect(report.runs[0]).toMatchObject({
+      runId,
+      previousStatus: null,
+      outcome: "skipped",
+      reason: "record-unreadable",
+      lock: "held",
+    });
+    const lock = await storage.readJson<{ ownerId: string; pid: number }>(
+      PAID_JOB_LOCK_SEGMENTS,
+    );
+    expect(lock).toMatchObject({ ownerId: runId, pid: process.pid });
+  });
+
   it("marks an orphan run interrupted and releases the stale lock once the group is gone", async () => {
     const storage = await makeStorage();
     const runId = randomUUID();

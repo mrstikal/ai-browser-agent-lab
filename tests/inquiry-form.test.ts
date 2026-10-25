@@ -10,6 +10,7 @@ import {
   loadInquirySubmission,
   saveInquirySubmission,
 } from "../src/server/inquiry-form";
+import { listSubmissions } from "../src/server/submissions-view";
 import { Storage } from "../src/server/storage";
 
 const tempDirs: string[] = [];
@@ -69,6 +70,39 @@ describe("product inquiry schema", () => {
 });
 
 describe("inquiry persistence", () => {
+  it("normalizes uppercase request IDs so later reads and retries work", async () => {
+    const storage = await makeStorage();
+    const uppercase = {
+      ...validInput,
+      requestId: validInput.requestId.toUpperCase(),
+    };
+    const saved = await saveInquirySubmission(storage, uppercase);
+    expect(saved.id).toBe(validInput.requestId);
+    expect(await loadInquirySubmission(storage, saved.id)).toMatchObject({
+      id: saved.id,
+      requestId: saved.id,
+    });
+    await expect(saveInquirySubmission(storage, uppercase)).resolves.toMatchObject({
+      id: saved.id,
+    });
+  });
+
+  it("treats a malformed createdAt as corrupt instead of crashing the view", async () => {
+    const storage = await makeStorage();
+    await storage.writeJson(["submissions", "inquiry", `${validInput.requestId}.json`], {
+      version: 1,
+      id: validInput.requestId,
+      createdAt: null,
+      ...validInput,
+    });
+    expect(
+      await loadInquirySubmission(storage, validInput.requestId),
+    ).toBeUndefined();
+    const view = await listSubmissions(storage);
+    expect(view.corruptInquiry).toBe(1);
+    expect(view.inquiry).toEqual([]);
+  });
+
   it("writes exactly one private record and is idempotent per request ID", async () => {
     const storage = await makeStorage();
     const saved = await saveInquirySubmission(storage, validInput);

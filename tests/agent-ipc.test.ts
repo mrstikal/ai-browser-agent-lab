@@ -9,6 +9,7 @@ import {
   agentParentMessageSchema,
   agentStartMessageSchema,
   agentWorkerMessageSchema,
+  customAgentTaskMaxChars,
 } from "../src/lib/agent-ipc";
 
 const runId = "6f6a1f9e-6a4e-4f3f-9d1a-2b3c4d5e6f70";
@@ -25,6 +26,18 @@ function startMessage(overrides: Record<string, unknown> = {}) {
     ...overrides,
   };
 }
+
+describe("custom agent task budget", () => {
+  it("reserves room for the server-added origin instruction", () => {
+    const origin = "http://127.0.0.1:3000";
+    expect(customAgentTaskMaxChars(origin)).toBe(
+      AGENT_WORKER_MAX_TASK_CHARS - `Start at ${origin}.`.length - 1,
+    );
+    expect(
+      `Start at ${origin}.\n${"x".repeat(customAgentTaskMaxChars(origin))}`,
+    ).toHaveLength(AGENT_WORKER_MAX_TASK_CHARS);
+  });
+});
 
 describe("agent run limits", () => {
   it("defaults to the documented 30 steps, 180 seconds, and $1.00", () => {

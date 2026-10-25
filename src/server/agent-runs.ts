@@ -139,6 +139,8 @@ export const agentRunRecordSchema = z
     uiEvidence: z.enum(["observed", "unverified"]),
     /** Actual Navigate page action recorded by the SDK; optional for old runs. */
     navigationObserved: z.boolean().optional(),
+    /** Click/Type interaction recorded by the SDK; optional for old runs. */
+    interactionObserved: z.boolean().optional(),
     /** URL the browser was on when the run ended; optional for old runs. */
     finalUrl: z.string().max(300).nullable().optional(),
     worker: agentRunWorkerSchema.nullable(),
@@ -199,8 +201,17 @@ export function normalizeAgentRunRecord(raw: RawAgentRunRecord): AgentRunRecord 
     cancelReason: raw.cancelReason ?? null,
     watchdogExpiredAt: raw.watchdogExpiredAt ?? null,
     navigationObserved: raw.navigationObserved ?? false,
+    interactionObserved: raw.interactionObserved ?? false,
     finalUrl: raw.finalUrl ?? null,
   };
+}
+
+/**
+ * Client-facing run projection. The form baseline is server-only evaluation
+ * state and must not be serialized into API responses.
+ */
+export function stripAgentRunBaseline(run: AgentRunRecord): AgentRunRecord {
+  return run.formBaseline === null ? run : { ...run, formBaseline: null };
 }
 
 export class AgentRunError extends Error {

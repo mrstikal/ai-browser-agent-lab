@@ -62,8 +62,12 @@ export const SUPPORT_PRIORITIES = ["Low", "Normal", "High"] as const;
 
 const emailSchema = z.string().trim().max(200).pipe(z.email());
 
+const submissionRequestIdSchema = z
+  .uuid()
+  .transform((value) => value.toLowerCase());
+
 export const supportSubmissionSchema = z.strictObject({
-  requestId: z.uuid(),
+  requestId: submissionRequestIdSchema,
   fullName: z.string().trim().min(2).max(120),
   email: emailSchema,
   subject: z.string().trim().min(3).max(160),
@@ -86,7 +90,7 @@ const productIdValues = products.map((product) => product.id) as [
 ];
 
 export const inquirySubmissionSchema = z.strictObject({
-  requestId: z.uuid(),
+  requestId: submissionRequestIdSchema,
   fullName: z.string().trim().min(2).max(120),
   email: emailSchema,
   productId: z.enum(productIdValues),

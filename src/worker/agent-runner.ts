@@ -56,6 +56,60 @@ export const AGENT_WORKER_INSTRUCTIONS = [
   "Interact with the page only through the visible browser UI.",
 ].join(" ");
 
+const ABSOLUTE_URL_PATTERN = /\bhttps?:\/\/[^\s"'`<>()\\]+/gi;
+const NETWORK_PATH_URL_PATTERN =
+  /(?:^|[^:\w])(\/\/(?:\[[0-9a-f:]+\]|[a-z0-9.-]+)(?::\d+)?(?:\/[^\s"'`<>()\\]*)?)/gi;
+
+/** Directory removal is allowed only when owned-process cleanup is verified. */
+export function cleanupVerifiedStatus(
+  status: "terminated" | "already-gone" | "escaped",
+): boolean {
+  return status === "terminated" || status === "already-gone";
+}
+
+/**
+ * The SDK allowlist compares hostnames only, so it cannot distinguish ports or
+ * schemes. Reject absolute and protocol-relative URLs in agent JavaScript that
+ * do not target the exact configured origin. This is a risk reduction for the
+ * unsandboxed JavaScript cell, not a substitute for OS-level network isolation.
+ */
+export function blockedOriginInCode(
+  code: string,
+  origin: string,
+): string | null {
+  let expected: string;
+  try {
+    expected = new URL(origin).origin;
+  } catch {
+    return "The configured application origin is invalid.";
+  }
+  for (const match of code.matchAll(ABSOLUTE_URL_PATTERN)) {
+    let parsed: URL;
+    try {
+      parsed = new URL(match[0]);
+    } catch {
+      continue;
+    }
+    if (parsed.origin !== expected) {
+      return `Only ${expected} may be accessed; ${parsed.origin} is outside the configured application origin.`;
+    }
+  }
+  for (const match of code.matchAll(NETWORK_PATH_URL_PATTERN)) {
+    const raw = match[1];
+    if (raw === undefined) continue;
+    let parsed: URL;
+    try {
+      parsed = new URL(raw, expected);
+    } catch {
+      continue;
+    }
+    if (parsed.origin !== expected) {
+      return `Only ${expected} may be accessed; ${parsed.origin} is outside the configured application origin.`;
+    }
+  }
+  return null;
+}
+
 interface NormalizedEvent {
   readonly kind: AgentWorkerEventKind;
   readonly toolName?: string | undefined;
@@ -163,6 +217,7 @@ async function runWorker(): Promise<number> {
     imageInputObserved: false,
     pageActionObserved: false,
     navigationObserved: false,
+    interactionObserved: false,
     finalUrl: null as string | null,
     profileDir: null as string | null,
     workspace: null as string | null,
@@ -348,6 +403,7 @@ async function runWorker(): Promise<number> {
       imageInputObserved: state.imageInputObserved,
       pageActionObserved: state.pageActionObserved,
       navigationObserved: state.navigationObserved,
+      interactionObserved: state.interactionObserved,
       finalUrl: state.finalUrl,
     };
   };
@@ -380,27 +436,20 @@ async function runWorker(): Promise<number> {
       if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return;
       const frames = (raw as { frames?: unknown }).frames;
       if (!Array.isArray(frames)) return;
-      const nonAction = new Set([
-        "Browser",
-        "completed",
-        "failed",
-        "error",
-        "incomplete",
-        "cancelled",
-        "timeout",
-        "cost_limit",
-        "max_steps",
-        "context_limit",
-        "stopping",
-      ]);
+      // Only actual browser-action labels count. A recording frame labelled
+      // with a status or an unknown internal name is not UI evidence.
+      const actionLabels = new Set(["Navigate", "Click", "Type", "Scroll"]);
       for (const frame of frames.slice(0, 50)) {
         if (typeof frame !== "object" || frame === null || Array.isArray(frame)) {
           continue;
         }
         const label = (frame as { label?: unknown }).label;
-        if (typeof label !== "string" || nonAction.has(label)) continue;
+        if (typeof label !== "string" || !actionLabels.has(label)) continue;
         state.pageActionObserved = true;
         if (label === "Navigate") state.navigationObserved = true;
+        if (label === "Click" || label === "Type") {
+          state.interactionObserved = true;
+        }
       }
     } catch (error) {
       logError(`The page-action recording could not be read: ${messageOf(error)}`, key);
@@ -428,6 +477,20 @@ async function runWorker(): Promise<number> {
     }
   };
 
+  const removeRunDirectories = async (
+    profileDir: string | null,
+    workspace: string | null,
+  ): Promise<void> => {
+    await Promise.all([
+      profileDir
+        ? rm(profileDir, { recursive: true, force: true }).catch(() => undefined)
+        : Promise.resolve(),
+      workspace
+        ? rm(workspace, { recursive: true, force: true }).catch(() => undefined)
+        : Promise.resolve(),
+    ]);
+  };
+
   const armOrphanDeadline = (): void => {
     if (state.orphanTimer !== null || !state.profileDir) return;
     state.orphanTimer = setTimeout(() => {
@@ -440,24 +503,23 @@ async function runWorker(): Promise<number> {
       );
       const workspace = state.workspace;
       void terminateOwnedAgentProcesses(profileDir)
+        .then(async (result) => {
+          if (!cleanupVerifiedStatus(result.status)) {
+            logError(
+              `Worker-side orphan cleanup could not verify that the browser is gone (${result.status}); keeping the profile and workspace for recovery and manual cleanup.`,
+              key,
+            );
+            return;
+          }
+          await removeRunDirectories(profileDir, workspace);
+        })
         .catch((error: unknown) => {
           logError(
-            `Worker-side orphan cleanup failed: ${messageOf(error)}`,
+            `Worker-side orphan cleanup failed: ${messageOf(error)}; keeping the profile and workspace for recovery and manual cleanup.`,
             key,
           );
-          return undefined;
         })
-        .finally(async () => {
-          await Promise.all([
-            rm(profileDir, { recursive: true, force: true }).catch(
-              () => undefined,
-            ),
-            workspace
-              ? rm(workspace, { recursive: true, force: true }).catch(
-                  () => undefined,
-                )
-              : Promise.resolve(),
-          ]);
+        .finally(() => {
           process.exit(1);
         });
     }, orphanDeadlineMs());
@@ -507,6 +569,29 @@ async function runWorker(): Promise<number> {
           workspace,
           allowedDomains: [config.hostname],
           prohibitedDomains: [],
+          beforeToolCall: async (context) => {
+            if (
+              context.toolCall.name !== "javascript" &&
+              context.toolCall.name !== "finish_from_js"
+            ) {
+              return undefined;
+            }
+            const args = context.args as {
+              code?: unknown;
+              expression?: unknown;
+            };
+            const source =
+              typeof args.code === "string"
+                ? args.code
+                : typeof args.expression === "string"
+                  ? args.expression
+                  : null;
+            if (source === null) return undefined;
+            const blocked = blockedOriginInCode(source, config.origin);
+            return blocked === null
+              ? undefined
+              : { block: true, reason: blocked, terminate: true };
+          },
           telemetry: false,
           highlightActions: true,
           // Bounded recording supplies actual page-action labels (Navigate,
@@ -613,6 +698,7 @@ async function runWorker(): Promise<number> {
         clearInterval(state.heartbeatTimer);
         state.heartbeatTimer = null;
       }
+      let cleanupVerified = true;
       if (state.agent) {
         try {
           await state.agent.close();
@@ -621,15 +707,30 @@ async function runWorker(): Promise<number> {
             `The agent browser could not be closed cleanly: ${messageOf(error)}`,
             key,
           );
+          if (profileDir) {
+            try {
+              const result = await terminateOwnedAgentProcesses(profileDir);
+              if (!cleanupVerifiedStatus(result.status)) {
+                cleanupVerified = false;
+                logError(
+                  `The browser process group could not be verified gone after close failed (${result.status}); keeping the profile and workspace for recovery and manual cleanup.`,
+                  key,
+                );
+              }
+            } catch (cleanupError) {
+              cleanupVerified = false;
+              logError(
+                `Owned-process cleanup after a failed close failed: ${messageOf(cleanupError)}; keeping the profile and workspace for recovery and manual cleanup.`,
+                key,
+              );
+            }
+          } else {
+            cleanupVerified = false;
+          }
         }
       }
-      if (workspace) {
-        await rm(workspace, { recursive: true, force: true }).catch(() => undefined);
-      }
-      if (profileDir) {
-        await rm(profileDir, { recursive: true, force: true }).catch(
-          () => undefined,
-        );
+      if (cleanupVerified) {
+        await removeRunDirectories(profileDir ?? null, workspace ?? null);
       }
     }
   };

@@ -124,6 +124,7 @@ export default async function SetupPage() {
               </p>
             ) : (
             <ConfirmEstimateForm
+              key={view.quote.quote.fingerprint}
               fingerprint={view.quote.quote.fingerprint}
               imageCount={view.quote.quote.imageCount}
               baseUsd={view.quote.quote.baseUsd}

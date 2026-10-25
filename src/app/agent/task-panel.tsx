@@ -120,7 +120,7 @@ export function TaskPanel({
             The server validates the model and applies these limits. A run can
             overshoot the soft cost cap by one response. Execution status is
             never presented as task success. Screenshot/vision input stays
-            unverified until a tool result carries image content.
+            unverified until image content from a tool result is carried into a subsequent model turn.
           </p>
         </div>
 
@@ -195,8 +195,9 @@ export function TaskPanel({
                 placeholder="Read the main heading on the shop page and return it as JSON."
               />
               <p id="agent-task-help" className="text-xs text-slate-500">
-                {task.length} / {maxTaskChars} characters. One bounded task per
-                run; the agent works only on the local app origin.
+                {task.length} / {maxTaskChars} characters, including the
+                server-added origin instruction. One bounded task per run; the
+                agent works only on the local app origin.
               </p>
               {whitespaceOnly ? (
                 <p role="alert" className="text-sm text-red-700">

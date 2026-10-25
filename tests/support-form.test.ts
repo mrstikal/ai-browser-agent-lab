@@ -9,6 +9,7 @@ import {
   saveSupportSubmission,
   SupportSubmissionError,
 } from "../src/server/support-form";
+import { listSubmissions } from "../src/server/submissions-view";
 import { Storage } from "../src/server/storage";
 
 const tempDirs: string[] = [];
@@ -61,6 +62,39 @@ describe("support submission schema", () => {
 });
 
 describe("support submission persistence", () => {
+  it("normalizes uppercase request IDs so later reads and retries work", async () => {
+    const storage = await makeStorage();
+    const uppercase = {
+      ...validInput,
+      requestId: validInput.requestId.toUpperCase(),
+    };
+    const saved = await saveSupportSubmission(storage, uppercase);
+    expect(saved.id).toBe(validInput.requestId);
+    expect(await loadSupportSubmission(storage, saved.id)).toMatchObject({
+      id: saved.id,
+      requestId: saved.id,
+    });
+    await expect(saveSupportSubmission(storage, uppercase)).resolves.toMatchObject({
+      id: saved.id,
+    });
+  });
+
+  it("treats a malformed createdAt as corrupt instead of crashing the view", async () => {
+    const storage = await makeStorage();
+    await storage.writeJson(["submissions", "support", `${validInput.requestId}.json`], {
+      version: 1,
+      id: validInput.requestId,
+      createdAt: 42,
+      ...validInput,
+    });
+    expect(
+      await loadSupportSubmission(storage, validInput.requestId),
+    ).toBeUndefined();
+    const view = await listSubmissions(storage);
+    expect(view.corruptSupport).toBe(1);
+    expect(view.support).toEqual([]);
+  });
+
   it("writes exactly one private record with a UUID filename", async () => {
     const storage = await makeStorage();
     const saved = await saveSupportSubmission(storage, validInput);

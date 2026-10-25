@@ -509,14 +509,24 @@ const agent = {
   },
   async execute(code) {
     if (typeof code === "string" && code.includes("page.info")) {
-      const match =
+      const urls =
         typeof currentTask === "string"
-          ? currentTask.match(/https?:\/\/[^\s"'`]+\/shop\b/)
-          : null;
+          ? (currentTask.match(/https?:\/\/[^\s"'`]+/g) ?? [])
+          : [];
+      const formUrl = urls.find((url) => url.includes("/forms/"));
+      let url = (formUrl ?? urls[0])?.replace(/[),.;]+$/, "");
+      if (
+        url !== undefined &&
+        typeof currentTask === "string" &&
+        currentTask.includes("inquiry form")
+      ) {
+        const parsed = new URL(url);
+        parsed.pathname = "/forms/inquiry";
+        url = parsed.href;
+      }
       return {
         text: JSON.stringify({
-          url:
-            match?.[0]?.replace(/[),.;]+$/, "") ?? "http://127.0.0.1:3000/",
+          url: url ?? "http://127.0.0.1:3000/",
           title: "Shop",
         }),
       };
@@ -536,6 +546,9 @@ const agent = {
       profileExistsAtClose:
         typeof profileDir === "string" && existsSync(profileDir),
     });
+    if (mode === "close-error") {
+      throw new Error("simulated close failure");
+    }
     if (mode === "close-hang") {
       if (typeof profileDir === "string") {
         const grandchild = spawn(

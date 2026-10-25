@@ -1,4 +1,5 @@
 import type { AgentRunRecord } from "@/server/agent-runs";
+import { presetUiEvidenceProblem } from "./agent-run-display";
 
 /**
  * Client-safe history summary. The full run record stays server-side; this
@@ -20,6 +21,8 @@ export interface AgentRunSummary {
   readonly usage: AgentRunRecord["usage"];
   readonly evaluation: AgentRunRecord["evaluation"];
   readonly uiEvidence: AgentRunRecord["uiEvidence"];
+  /** Bounded page-evidence verdict; avoids exposing the origin/final URL. */
+  readonly pageEvidence: "observed" | "unverified";
   readonly vision: AgentRunRecord["vision"];
   readonly uiMode: AgentRunRecord["uiMode"];
   /** Bounded failure context; the full record error stays server-side. */
@@ -59,6 +62,8 @@ export function toAgentRunSummary(run: AgentRunRecord): AgentRunSummary {
     usage: run.usage,
     evaluation: run.evaluation,
     uiEvidence: run.uiEvidence,
+    pageEvidence:
+      presetUiEvidenceProblem(run) === null ? "observed" : "unverified",
     vision: run.vision,
     uiMode: run.uiMode,
     errorSummary: summarizeError(run.error),

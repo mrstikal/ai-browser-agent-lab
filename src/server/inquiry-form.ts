@@ -1,3 +1,4 @@
+import { z } from "zod";
 import {
   inquirySubmissionSchema,
   type InquirySubmissionInput,
@@ -128,6 +129,12 @@ export async function loadInquirySubmission(
   try {
     const parsed = JSON.parse(raw.toString("utf8")) as InquirySubmissionRecord;
     if (parsed.version !== INQUIRY_SUBMISSION_VERSION || parsed.id !== id) {
+      return undefined;
+    }
+    if (
+      typeof parsed.createdAt !== "string" ||
+      !z.iso.datetime().safeParse(parsed.createdAt).success
+    ) {
       return undefined;
     }
     const { version: _version, id: _id, createdAt: _createdAt, ...input } = parsed;

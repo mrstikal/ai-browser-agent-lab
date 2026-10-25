@@ -1,3 +1,4 @@
+import { z } from "zod";
 import {
   supportSubmissionSchema,
   type SupportSubmissionInput,
@@ -135,6 +136,12 @@ export async function loadSupportSubmission(
   try {
     const parsed = JSON.parse(raw.toString("utf8")) as SupportSubmissionRecord;
     if (parsed.version !== SUPPORT_SUBMISSION_VERSION || parsed.id !== id) {
+      return undefined;
+    }
+    if (
+      typeof parsed.createdAt !== "string" ||
+      !z.iso.datetime().safeParse(parsed.createdAt).success
+    ) {
       return undefined;
     }
     const { version: _version, id: _id, createdAt: _createdAt, ...input } = parsed;

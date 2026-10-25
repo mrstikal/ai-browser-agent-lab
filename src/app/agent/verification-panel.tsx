@@ -101,8 +101,8 @@ export function VerificationPanel({
             <dt className="font-medium text-slate-500">Screenshot input</dt>
             <dd data-testid="verification-vision">
               {gate.vision === "observed"
-                ? "Observed (a tool result carried image content)"
-                : "Unverified (no image transport evidence yet)"}
+                ? "Observed (image content from a tool result reached a later model turn)"
+                : "Unverified (no image content reached a later model turn)"}
             </dd>
           </div>
           <div>

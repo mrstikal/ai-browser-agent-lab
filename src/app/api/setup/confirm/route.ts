@@ -66,7 +66,7 @@ export async function POST(request: Request) {
   let keyAvailable: boolean;
   let apiKey: string | undefined;
   try {
-    keyAvailable = (await getKeyStatus()).keyAvailable;
+    keyAvailable = (await getKeyStatus(undefined, { sweepTemps: false })).keyAvailable;
     apiKey = await loadOpenRouterKey();
   } catch {
     return failure(

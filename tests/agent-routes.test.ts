@@ -20,6 +20,7 @@ import {
   readInstalledSdkVersion,
   resetAgentSupervisorForTests,
 } from "@/server/agent-manager";
+import type { AgentRunSummary } from "@/lib/agent-history";
 import {
   isTerminalAgentRunStatus,
   loadAgentRun,
@@ -94,7 +95,7 @@ function makeRequest(
 interface StatusBody {
   activeRunId: string | null;
   gate: { keyAvailable: boolean; verified: boolean; reason: string };
-  runs: AgentRunRecord[];
+  runs: AgentRunSummary[];
   corruptRuns: number;
   recovery: {
     status: string;
@@ -106,7 +107,22 @@ interface StatusBody {
 async function getStatus(): Promise<StatusBody> {
   const response = await statusRoute.GET();
   expect(response.status).toBe(200);
-  return (await response.json()) as StatusBody;
+  const body = (await response.json()) as {
+    view: {
+      activeRunId: string | null;
+      gate: StatusBody["gate"];
+      history: AgentRunSummary[];
+      recovery: StatusBody["recovery"];
+    };
+    corruptRuns: number;
+  };
+  return {
+    activeRunId: body.view.activeRunId,
+    gate: body.view.gate,
+    runs: body.view.history,
+    corruptRuns: body.corruptRuns,
+    recovery: body.view.recovery,
+  };
 }
 
 async function waitForRun(
@@ -124,7 +140,8 @@ async function waitForRun(
       isTerminalAgentRunStatus(run.status) &&
       status.activeRunId === null
     ) {
-      return run;
+      const persisted = await loadAgentRun(createStorage(), runId);
+      if (persisted) return persisted;
     }
     await sleep(25);
   }
@@ -436,7 +453,7 @@ describe("agent run API routes", () => {
         status = await getStatus();
       }
       expect(status.activeRunId).toBeNull();
-      const hung = status.runs.find((run) => run.runId === runId);
+      const hung = await loadAgentRun(createStorage(), runId);
       expect(hung?.watchdogExpiredAt).not.toBeNull();
       expect(hung?.status).toBe("failed");
       expect(hung?.error).toMatch(/force-terminated|exited before reporting/);
@@ -616,11 +633,16 @@ describe("agent verification API route", () => {
       expect(body.run).toMatchObject({
         kind: "task",
         presetId: "form-support-request",
-        formBaseline: { form: "support", submissionIds: [] },
+        formBaseline: null,
         status: "running",
         evaluation: { status: "not_evaluated", reason: null },
       });
       expect(body.run.task).toContain(`${origin}/forms/support`);
+      const persisted = await loadAgentRun(createStorage(), body.run.runId);
+      expect(persisted?.formBaseline).toEqual({
+        form: "support",
+        submissionIds: [],
+      });
 
       const finished = await waitForRun(body.run.runId);
       expect(finished).toMatchObject({

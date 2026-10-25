@@ -2,6 +2,11 @@ import type { AgentGate } from "@/server/agent-manager";
 import type { AgentRunRecord } from "@/server/agent-runs";
 import type { AgentRunSummary } from "./agent-history";
 import type { AgentRunStatus } from "./agent-ipc";
+import {
+  isAgentCatalogTaskId,
+  isAgentFormTaskId,
+  isAgentPresetTaskId,
+} from "./agent-tasks";
 import { AGENT_UI_MODE_LABELS, type AgentUiMode } from "./agent-ui-mode";
 import { formatUsd } from "./format";
 
@@ -116,8 +121,13 @@ export function describeTaskResult(
 export function describeHistoryResult(
   run: Pick<
     AgentRunSummary,
-    "kind" | "presetId" | "status" | "stopReason" | "evaluation" | "uiEvidence"
-  >,
+    | "kind"
+    | "presetId"
+    | "status"
+    | "stopReason"
+    | "evaluation"
+    | "uiEvidence"
+  > & { readonly pageEvidence?: "observed" | "unverified" },
 ): TaskResultDescription {
   if (run.kind === "task" && run.presetId !== null) {
     return describeOverallTaskResult(run);
@@ -189,15 +199,81 @@ export function shouldShowOverallTaskResult(
 }
 
 /**
- * Overall outcome for a predefined task. A matching business answer is not a
- * full pass unless the execution completed and a recorded browser page action
- * was observed; custom tasks remain not evaluated.
+ * A recorded page action is necessary but not sufficient: the trace must also
+ * show that the run ended on the relevant local page. Catalog tasks need a
+ * Navigate and a shop URL; form tasks need a Click/Type interaction and the
+ * relevant form URL. The recording does not carry per-frame URLs, so the final
+ * URL is the available page-level evidence.
  */
-export function describeOverallTaskResult(
+export function presetUiEvidenceProblem(
   run: Pick<
     AgentRunRecord,
-    "kind" | "presetId" | "status" | "stopReason" | "evaluation" | "uiEvidence"
+    "presetId" | "origin" | "finalUrl" | "navigationObserved" | "interactionObserved"
   >,
+): string | null {
+  const presetId = run.presetId;
+  if (presetId === null || !isAgentPresetTaskId(presetId)) return null;
+  let expected: URL;
+  let finalUrl: URL;
+  try {
+    expected = new URL(run.origin);
+  } catch {
+    return "The configured origin is invalid, so page evidence cannot be checked.";
+  }
+  if (run.finalUrl === null || run.finalUrl === undefined) {
+    return "No final browser URL was recorded.";
+  }
+  try {
+    finalUrl = new URL(run.finalUrl, expected);
+  } catch {
+    return "The final browser URL is malformed.";
+  }
+  if (finalUrl.origin !== expected.origin) {
+    return "The browser finished outside the configured application origin.";
+  }
+  if (isAgentCatalogTaskId(presetId)) {
+    if (run.navigationObserved !== true) {
+      return "No recorded Navigate action shows catalog browsing.";
+    }
+    if (finalUrl.pathname !== "/shop" && !finalUrl.pathname.startsWith("/shop/")) {
+      return "The final page was not in the local shop.";
+    }
+    return null;
+  }
+  if (isAgentFormTaskId(presetId)) {
+    if (run.interactionObserved !== true) {
+      return "No recorded Click or Type interaction shows form use.";
+    }
+    const formPath =
+      presetId === "form-support-request" ? "/forms/support" : "/forms/inquiry";
+    if (finalUrl.pathname !== formPath) {
+      return "The final page was not the relevant local form.";
+    }
+    return null;
+  }
+  return null;
+}
+
+/**
+ * Overall outcome for a predefined task. A matching business answer is not a
+ * full pass unless the execution completed, a recorded browser page action was
+ * observed, and the page-level evidence matches the task family; custom tasks
+ * remain not evaluated.
+ */
+export function describeOverallTaskResult(
+  run: {
+    readonly kind: AgentRunRecord["kind"];
+    readonly presetId: AgentRunRecord["presetId"];
+    readonly status: AgentRunRecord["status"];
+    readonly stopReason: AgentRunRecord["stopReason"];
+    readonly evaluation: AgentRunRecord["evaluation"];
+    readonly uiEvidence: AgentRunRecord["uiEvidence"];
+    readonly origin?: AgentRunRecord["origin"];
+    readonly navigationObserved?: AgentRunRecord["navigationObserved"];
+    readonly interactionObserved?: AgentRunRecord["interactionObserved"];
+    readonly finalUrl?: AgentRunRecord["finalUrl"];
+    readonly pageEvidence?: "observed" | "unverified";
+  },
 ): OverallTaskResult {
   if (!shouldShowOverallTaskResult(run)) {
     return {
@@ -257,11 +333,31 @@ export function describeOverallTaskResult(
       fullPass: false,
     };
   }
+  const pageProblem =
+    run.pageEvidence === "observed"
+      ? null
+      : run.pageEvidence === "unverified"
+        ? "The recorded page evidence is incomplete."
+        : presetUiEvidenceProblem({
+            presetId: run.presetId,
+            origin: run.origin ?? "",
+            finalUrl: run.finalUrl,
+            navigationObserved: run.navigationObserved,
+            interactionObserved: run.interactionObserved,
+          });
+  if (pageProblem !== null) {
+    return {
+      label: "Business result passed; UI evidence incomplete",
+      tone: "warning",
+      detail: `${pageProblem} This is not a full pass.`,
+      fullPass: false,
+    };
+  }
   return {
     label: "Full task pass",
     tone: "success",
     detail:
-      "The execution completed, the business result matched, and a recorded browser page action was observed.",
+      "The execution completed, the business result matched, and recorded page actions show the relevant local page interaction.",
     fullPass: true,
   };
 }

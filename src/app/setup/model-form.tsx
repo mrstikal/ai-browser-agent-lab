@@ -35,6 +35,8 @@ export function ModelForm({ image, browser }: ModelFormProps) {
     body: unknown,
   ): Promise<void> {
     setBusy(kind);
+    setImageMessage(null);
+    setBrowserMessage(null);
     setImageError(null);
     setBrowserError(null);
     try {
