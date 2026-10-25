@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useState, type ChangeEvent, type FormEvent } from "react";
+import type { AgentUiMode } from "@/lib/agent-ui-mode";
 import { INQUIRY_TYPES, inquirySubmissionSchema } from "@/lib/schemas";
 import { products } from "@/lib/products";
 import { guardedJsonFetch, readErrorMessage } from "@/app/setup/guard-fetch";
@@ -25,7 +26,13 @@ const emptyValues = (productId: string): InquiryValues => ({
 const inputClass =
   "w-full rounded border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none";
 
-export function InquiryForm({ initialProductId }: { initialProductId: string }) {
+export function InquiryForm({
+  initialProductId,
+  mode = "classic",
+}: {
+  initialProductId: string;
+  mode?: AgentUiMode;
+}) {
   const [values, setValues] = useState<InquiryValues>(() =>
     emptyValues(initialProductId),
   );
@@ -34,6 +41,11 @@ export function InquiryForm({ initialProductId }: { initialProductId: string }) 
   const [busy, setBusy] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [savedRequestId, setSavedRequestId] = useState<string | null>(null);
+  const formClass =
+    mode === "alternate"
+      ? "grid gap-4 rounded-lg border border-slate-200 bg-white p-5 sm:grid-cols-2"
+      : "space-y-4 rounded-lg border border-slate-200 bg-white p-5";
+  const fullWidth = mode === "alternate" ? "sm:col-span-2" : "";
 
   function field(name: keyof InquiryValues) {
     return {
@@ -135,8 +147,9 @@ export function InquiryForm({ initialProductId }: { initialProductId: string }) 
     <form
       onSubmit={submit}
       noValidate
-      className="space-y-4 rounded-lg border border-slate-200 bg-white p-5"
+      className={formClass}
       data-testid="inquiry-form"
+      data-ui-mode={mode}
     >
       <div className="space-y-1">
         <label htmlFor="inquiry-fullName" className="block text-sm font-medium">
@@ -194,7 +207,7 @@ export function InquiryForm({ initialProductId }: { initialProductId: string }) 
         </select>
       </div>
 
-      <div className="space-y-1">
+      <div className={`space-y-1 ${fullWidth}`}>
         <label htmlFor="inquiry-message" className="block text-sm font-medium">
           Message
         </label>
@@ -209,13 +222,13 @@ export function InquiryForm({ initialProductId }: { initialProductId: string }) 
       <button
         type="submit"
         disabled={busy}
-        className="rounded bg-slate-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+        className={`rounded bg-slate-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50 ${fullWidth}`}
         data-testid="inquiry-submit"
       >
         {busy ? "Submitting..." : "Submit inquiry"}
       </button>
       {submitError ? (
-        <p role="alert" className="text-sm text-red-700">
+        <p role="alert" className={`text-sm text-red-700 ${fullWidth}`}>
           {submitError}
         </p>
       ) : null}

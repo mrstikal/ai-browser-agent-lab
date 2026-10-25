@@ -1,13 +1,20 @@
 import type { Metadata } from "next";
+import { UiModeSwitcher } from "@/components/ui-mode-switcher";
+import { createStorage } from "@/server/storage";
+import { loadUiModeView } from "@/server/ui-mode";
 import { SupportForm } from "./support-form";
+
+export const dynamic = "force-dynamic";
 
 export const metadata: Metadata = {
   title: "Support request",
 };
 
-export default function SupportPage() {
+export default async function SupportPage() {
+  const uiMode = await loadUiModeView(createStorage());
+
   return (
-    <div className="space-y-6">
+    <div className="space-y-6" data-ui-mode={uiMode.mode}>
       <header className="space-y-2">
         <p className="text-sm font-medium uppercase tracking-wide text-slate-500">
           Local test form
@@ -18,7 +25,8 @@ export default function SupportPage() {
           submission, and only then submit. Nothing is stored until the final submit.
         </p>
       </header>
-      <SupportForm />
+      <UiModeSwitcher mode={uiMode.mode} error={uiMode.error} />
+      <SupportForm mode={uiMode.mode} />
     </div>
   );
 }

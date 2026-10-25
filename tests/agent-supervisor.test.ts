@@ -76,6 +76,7 @@ import {
 import { loadAgentRecoveryReport } from "../src/server/agent-recovery";
 import { listAgentGroupMembers } from "../src/server/agent-group";
 import { createStorage, type Storage } from "../src/server/storage";
+import { saveUiMode } from "../src/server/ui-mode";
 
 const TEST_KEY = "supervisor-test-secret-key-77";
 const fakeSdkUrl = new URL(
@@ -2008,6 +2009,39 @@ describe("agent supervisor", () => {
         confirmationId?: string;
       };
       expect(ids).toContain(output.confirmationId);
+    },
+  );
+
+  it(
+    "captures the persisted layout mode at run start and keeps it on the record",
+    { timeout: 30_000 },
+    async () => {
+      const context = await makeContext("success");
+      await seedKey(context);
+      await seedStamp(context);
+      await saveUiMode(
+        context.storage,
+        "alternate",
+        new Date("2026-10-25T12:00:00.000Z"),
+      );
+
+      const started = await startAgentRun({
+        kind: "task",
+        task: "Read the main heading.",
+        env: context.env,
+        storage: context.storage,
+      });
+      expect(started.status).toBe("started");
+      if (started.status !== "started") return;
+      expect(started.run.uiMode).toBe("alternate");
+
+      const finished = await waitForTerminal(context.storage, started.run.runId);
+      expect(finished.uiMode).toBe("alternate");
+      await waitForIdle(context.storage);
+
+      await saveUiMode(context.storage, "classic");
+      const afterSwitch = await loadAgentRun(context.storage, started.run.runId);
+      expect(afterSwitch?.uiMode).toBe("alternate");
     },
   );
 });

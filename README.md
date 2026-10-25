@@ -7,7 +7,8 @@ A standalone, single-user, local proof of concept. It combines:
 - two local test forms with persisted submissions;
 - a real local Chromium agent driven by `@browser_use/pi`;
 - deterministic, server-side evaluation of five preset browser tasks;
-- persisted run history, traces, and honest execution/usage labels.
+- persisted run history, traces, and honest execution/usage labels;
+- optional Classic and Alternate layouts that rearrange the same catalog and form content.
 
 There is no checkout, payment, authentication, multi-user support, cloud browser, or
 external database. The application binds to a loopback origin only and stores its state
@@ -29,6 +30,9 @@ acceptance is deliberately separate:
   screenshots reached the model.
 - A completed agent process is not a passed business task. The dashboard shows
   execution status, the independent evaluation, and UI evidence separately.
+- Classic and Alternate layouts are available on the catalog, forms, and agent pages.
+  They change only arrangement; data, routes, labels, and task instructions stay the
+  same. Each new agent run records the mode at its start.
 
 The development checkout has a recorded authorized heading observation for the tuple
 `openrouter/openai/gpt-5.6-luna`, `@browser_use/pi` `0.1.0`, and
@@ -240,6 +244,28 @@ On startup the server performs local-only recovery before serving:
   inquiry records; it never removes images, keys, settings, or agent history. It is
   refused during an active agent run or another paid operation.
 
+### Classic and Alternate layouts
+
+The layout switcher is available on `/shop`, both form pages, and `/agent`. It is one
+global local setting, so the agent's browser sees the same arrangement as your browser.
+
+- **Classic**: catalog filters above a three-column card grid, and single-column form
+  fields.
+- **Alternate**: catalog filters in a sidebar beside a two-column card grid, and
+  two-column form fields with the long text area spanning both columns.
+
+Both modes render the same products, labels, field names, values, validation, URLs, and
+task instructions. The DOM order stays the same; only the visual arrangement changes. The
+setting is stored in `data/ui-settings.json` (mode and timestamp only) and defaults to
+Classic. It is not a query parameter or cookie, so it cannot silently change a catalog or
+form URL.
+
+The mode is captured from this setting at the start of each new agent run. A saved run
+keeps its original mode after you switch layouts. Changing the layout briefly reserves the
+same exclusive paid-operation slot: it is refused while an image batch or agent run is
+active, and a run start is refused while a layout change is in flight. The mode captured at
+start therefore stays stable for the whole run.
+
 ## Browser agent
 
 ### Verify the browser model first
@@ -320,6 +346,7 @@ filesystem supports them:
 data/
   .server.lock
   settings.json                    # model choices; never the key
+  ui-settings.json                 # Classic/Alternate layout; no personal data
   agent-compatibility.json         # verified model/SDK/origin tuple; never the key
   secrets/openrouter-key           # only with Remember on; plaintext, mode 0600
   images/manifest.json             # lifetime attempt/active-image ledger
@@ -415,6 +442,7 @@ npm run lint
 npm run typecheck
 npm test
 npm run test:e2e
+npm run test:e2e:alternate
 npm run build
 npm run smoke:browser-local
 npm run smoke:built-worker
@@ -425,7 +453,12 @@ npm run smoke:built-worker
   temporary `DATA_DIR`, runs Playwright against a loopback dev server with system Chrome,
   and removes the mock/temp data afterwards. It covers the full 24-image mock flow, forms,
   catalog, setup/progress, image delivery, agent dashboard/worker, server lock, and
-  mutation guard.
+  mutation guard, including the layout toggle.
+- `npm run test:e2e:alternate` seeds the disposable test data with Alternate and reruns
+  the existing catalog and form Playwright specs. The default suite starts in Classic, so
+  the same assertions are proven in both arrangements. The harness options
+  `--ui-mode=classic` and `--ui-mode=alternate` are test-only and must not be used
+  with real `data/`.
 - `npm run smoke:browser-local` launches local Chromium, reads a local heading through both
   `127.0.0.1` and `localhost`, and closes it. It uses no inference and no key. Use
   `npm run smoke:browser-local -- --headless` only for a display-less feasibility check.
@@ -480,6 +513,7 @@ Never point `OPENROUTER_BASE_URL` at a remote host, never use the test seams wit
 | Vision shows `Unverified` | Expected unless a tool result actually carried image content. A text heading answer is not vision evidence. |
 | Agent run is `hung`, or a browser process remains | Restart the app and let startup recovery verify/terminate the recorded group. Inspect `data/agent-recovery.json`, `data/locks/paid-job.lock`, and `data/browser-profiles/`. Do not delete locks before confirming processes are gone. |
 | Corrupt saved state | Inspect the named JSON file under `data/`; the app reports corruption rather than discarding data. Fix or restore the file, or perform a deliberate full reset. |
+| Layout shows Classic despite a saved choice, or the layout cannot change | Inspect `data/ui-settings.json`. A corrupt optional layout setting falls back to Classic on catalog/form/agent pages with a warning and blocks a new agent run as `state-unreadable`; fix or remove the file deliberately. A `409 paid-operation-active` response means an image batch, agent run, or another layout change is active. |
 | Image or job state is incomplete after a crash | Restart once so local recovery can reconcile matching attempts and mark the job interrupted. Then use a fresh quote and confirmation to resume. |
 | E2E refuses a base-URL override | The override requires `LAB_TEST_MODE=1` and a disposable `DATA_DIR` under the OS temp root outside the project. Use the provided `npm run test:e2e` harness instead of a real data directory. |
 | Dev server behaves oddly after a production build | Stop it and remove only the dev cache (`.next/dev`), then restart. Do not delete `data/` to fix a cache issue. |
@@ -491,5 +525,5 @@ Never point `OPENROUTER_BASE_URL` at a remote host, never use the test seams wit
 - One server per data directory and one paid operation at a time are enforced. Agent runs
   are limited to one active run.
 - Paid live image/agent acceptance remains separately approved and unverified until
-  actually observed. The optional alternate UI and resilience comparison are not part of
-  the core implementation.
+  actually observed. The optional alternate UI is implemented; the optional resilience
+  comparison is not part of the core implementation.

@@ -1,4 +1,5 @@
 import Link from "next/link";
+import type { AgentUiMode } from "@/lib/agent-ui-mode";
 import type { CatalogQuery } from "@/lib/catalog";
 import { PRODUCT_CATEGORIES } from "@/lib/products";
 
@@ -6,7 +7,13 @@ const fieldClass =
   "mt-1 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm shadow-sm focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-200";
 const labelClass = "text-sm font-medium text-slate-700";
 
-export function CatalogFilters({ query }: { query: CatalogQuery }) {
+export function CatalogFilters({
+  query,
+  mode = "classic",
+}: {
+  query: CatalogQuery;
+  mode?: AgentUiMode;
+}) {
   const hasActiveFilters =
     query.q !== "" ||
     query.category !== null ||
@@ -19,9 +26,16 @@ export function CatalogFilters({ query }: { query: CatalogQuery }) {
       action="/shop"
       role="search"
       aria-label="Catalog filters"
+      data-ui-mode={mode}
       className="rounded-xl border border-slate-200 bg-white p-4"
     >
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+      <div
+        className={
+          mode === "alternate"
+            ? "space-y-4"
+            : "grid gap-4 md:grid-cols-2 lg:grid-cols-4"
+        }
+      >
         <div>
           <label htmlFor="catalog-q" className={labelClass}>
             Search products

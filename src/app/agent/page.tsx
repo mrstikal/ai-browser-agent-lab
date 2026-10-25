@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { UiModeSwitcher } from "@/components/ui-mode-switcher";
 import {
   AGENT_RUN_DEFAULT_LIMITS,
   AGENT_RUN_MAX_COST_USD,
@@ -15,6 +16,7 @@ import {
 import { EMPTY_AGENT_TRACE, type AgentTraceState } from "@/lib/agent-trace";
 import { loadAgentTraceView } from "@/server/agent-trace";
 import { createStorage } from "@/server/storage";
+import { loadUiModeView, type UiModeView } from "@/server/ui-mode";
 import {
   AGENT_VERIFICATION_LIMITS,
   loadAgentStatus,
@@ -34,8 +36,10 @@ export default async function AgentPage() {
   let initialTrace: AgentTraceState = EMPTY_AGENT_TRACE;
   let initialTraceError: string | null = null;
   let error: string | null = null;
+  let uiModeView: UiModeView = { mode: "classic", error: null };
   try {
     const storage = createStorage();
+    uiModeView = await loadUiModeView(storage);
     status = await loadAgentStatus({ storage });
     view = pickAgentDashboardView(status);
     const traceRun = selectTraceRun(view);
@@ -65,6 +69,8 @@ export default async function AgentPage() {
           execution status, output, and independent evaluation separately.
         </p>
       </header>
+
+      <UiModeSwitcher mode={uiModeView.mode} error={uiModeView.error} />
 
       {error ? (
         <p

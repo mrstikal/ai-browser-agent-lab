@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -8,6 +8,15 @@ import { startMockOpenRouter } from "./mock-openrouter.mjs";
 
 const projectRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const playwrightBin = join(projectRoot, "node_modules", ".bin", "playwright");
+
+const args = process.argv.slice(2);
+const uiModeArg = args.find((arg) => arg.startsWith("--ui-mode="));
+const uiMode = uiModeArg?.slice("--ui-mode=".length);
+if (uiMode !== undefined && uiMode !== "classic" && uiMode !== "alternate") {
+  console.error("--ui-mode must be classic or alternate.");
+  process.exit(1);
+}
+const playwrightArgs = args.filter((arg) => !arg.startsWith("--ui-mode="));
 
 function freePort() {
   return new Promise((resolve, reject) => {
@@ -30,6 +39,22 @@ function freePort() {
 
 const port = await freePort();
 const dataDir = await mkdtemp(join(tmpdir(), "ai-browser-lab-e2e-data-"));
+if (uiMode !== undefined) {
+  await writeFile(
+    join(dataDir, "ui-settings.json"),
+    `${JSON.stringify(
+      {
+        version: 1,
+        mode: uiMode,
+        updatedAt: new Date().toISOString(),
+      },
+      null,
+      2,
+    )}\n`,
+    { mode: 0o600 },
+  );
+  console.log(`[ai-browser-agent-lab] UI mode: ${uiMode}`);
+}
 // A production build and the dev server share `.next`; a stale `.next/dev`
 // after `npm run build` can make Turbopack emit HMR hash-mismatch reloads that
 // race deterministic navigations. Reset only the dev cache.
@@ -51,7 +76,7 @@ try {
 }
 console.log(`[ai-browser-agent-lab] mock OpenRouter: ${mock.baseUrl}`);
 
-const child = spawn(playwrightBin, ["test", ...process.argv.slice(2)], {
+const child = spawn(playwrightBin, ["test", ...playwrightArgs], {
   stdio: "inherit",
   env: {
     ...process.env,

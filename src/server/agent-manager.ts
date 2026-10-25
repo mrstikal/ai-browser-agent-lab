@@ -19,6 +19,7 @@ import {
   type AgentWorkerEventMessage,
   type AgentWorkerResultMessage,
 } from "../lib/agent-ipc";
+import type { AgentUiMode } from "../lib/agent-ui-mode";
 import { HEALTH_MARKER } from "../lib/health";
 import {
   agentPresetTaskIdSchema,
@@ -70,6 +71,7 @@ import {
 } from "./process-identity";
 import { redactText } from "../lib/agent-output";
 import { createStorage, type Storage, type StorageEnv } from "./storage";
+import { loadUiMode } from "./ui-mode";
 
 export const AGENT_WORKER_ENTRY_SEGMENTS = ["src", "worker", "agent-runner.ts"] as const;
 export const AGENT_HEALTH_TIMEOUT_MS = 3_000;
@@ -768,6 +770,17 @@ export async function startAgentRun(
     return { status: "key-required" };
   }
 
+  // Capture the persisted layout once, before the run record exists. A corrupt
+  // setting fails closed and releases the paid lock instead of recording a
+  // mode the worker did not necessarily see.
+  let uiMode: AgentUiMode;
+  try {
+    uiMode = await loadUiMode(storage);
+  } catch (error) {
+    await refuse();
+    throw error;
+  }
+
   // The snapshot must reach the initial run record before the worker can
   // submit a new form record. It is taken as late as practical, after the paid
   // lock and gate, so only records created during the run appear as new; a
@@ -789,7 +802,7 @@ export async function startAgentRun(
     runId,
     kind: options.kind,
     presetId,
-    uiMode: null,
+    uiMode,
     formBaseline,
     task,
     modelId: gate.modelId,

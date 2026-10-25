@@ -318,7 +318,7 @@ test("history keeps persisted runs, honest usage, and historical traces", async 
     "Unverified",
   );
   await expect(xssItem.getByTestId("agent-history-ui-mode")).toHaveText(
-    "not captured",
+    "Classic",
   );
   await expect(xssItem.getByTestId("agent-history-usage")).toContainText(
     "15 tokens",

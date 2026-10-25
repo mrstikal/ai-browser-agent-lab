@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useState, type ChangeEvent, type FormEvent } from "react";
+import type { AgentUiMode } from "@/lib/agent-ui-mode";
 import { SUPPORT_PRIORITIES, supportSubmissionSchema } from "@/lib/schemas";
 import { guardedJsonFetch, readErrorMessage } from "@/app/setup/guard-fetch";
 
@@ -26,7 +27,7 @@ const inputClass =
 
 type Step = "edit" | "review" | "done";
 
-export function SupportForm() {
+export function SupportForm({ mode = "classic" }: { mode?: AgentUiMode }) {
   const [values, setValues] = useState<SupportValues>(EMPTY_VALUES);
   const [step, setStep] = useState<Step>("edit");
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -35,6 +36,11 @@ export function SupportForm() {
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [requestId] = useState(() => crypto.randomUUID());
   const [savedRequestId, setSavedRequestId] = useState<string | null>(null);
+  const formClass =
+    mode === "alternate"
+      ? "grid gap-4 rounded-lg border border-slate-200 bg-white p-5 sm:grid-cols-2"
+      : "space-y-4 rounded-lg border border-slate-200 bg-white p-5";
+  const fullWidth = mode === "alternate" ? "sm:col-span-2" : "";
 
   function field(name: keyof SupportValues) {
     return {
@@ -218,8 +224,9 @@ export function SupportForm() {
     <form
       onSubmit={review}
       noValidate
-      className="space-y-4 rounded-lg border border-slate-200 bg-white p-5"
+      className={formClass}
       data-testid="support-form"
+      data-ui-mode={mode}
     >
       <div className="space-y-1">
         <label htmlFor="support-fullName" className="block text-sm font-medium">
@@ -270,7 +277,7 @@ export function SupportForm() {
         </select>
       </div>
 
-      <div className="space-y-1">
+      <div className={`space-y-1 ${fullWidth}`}>
         <label htmlFor="support-description" className="block text-sm font-medium">
           Description
         </label>
@@ -284,7 +291,7 @@ export function SupportForm() {
 
       <button
         type="submit"
-        className="rounded bg-slate-900 px-4 py-2 text-sm font-medium text-white"
+        className={`rounded bg-slate-900 px-4 py-2 text-sm font-medium text-white ${fullWidth}`}
         data-testid="support-review"
       >
         Review request

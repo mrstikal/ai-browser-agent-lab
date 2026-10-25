@@ -18,6 +18,7 @@
     "smoke:browser-local": "node scripts/check-node.mjs && tsx scripts/browser-smoke.ts",
     "test:agent": "node scripts/check-node.mjs && tsx scripts/agent-model-smoke.ts",
     "test:e2e": "node scripts/check-node.mjs && node scripts/run-e2e.mjs",
+    "test:e2e:alternate": "node scripts/check-node.mjs && node scripts/run-e2e.mjs --ui-mode=alternate tests/e2e/shop.spec.ts tests/e2e/support-form.spec.ts tests/e2e/inquiry-form.spec.ts tests/e2e/product-details.spec.ts",
     "smoke:built-worker": "node scripts/check-node.mjs && tsx scripts/built-worker-smoke.ts"
   },
   "dependencies": {

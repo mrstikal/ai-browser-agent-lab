@@ -1,5 +1,8 @@
 import type { Metadata } from "next";
+import { UiModeSwitcher } from "@/components/ui-mode-switcher";
 import { products } from "@/lib/products";
+import { createStorage } from "@/server/storage";
+import { loadUiModeView } from "@/server/ui-mode";
 import { InquiryForm } from "./inquiry-form";
 
 export const dynamic = "force-dynamic";
@@ -17,9 +20,10 @@ export default async function InquiryPage({ searchParams }: InquiryPageProps) {
   const raw = typeof params.productId === "string" ? params.productId : "";
   const initialProductId =
     products.find((product) => product.id === raw)?.id ?? "";
+  const uiMode = await loadUiModeView(createStorage());
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6" data-ui-mode={uiMode.mode}>
       <header className="space-y-2">
         <p className="text-sm font-medium uppercase tracking-wide text-slate-500">
           Local test form
@@ -30,7 +34,8 @@ export default async function InquiryPage({ searchParams }: InquiryPageProps) {
           product; only known product IDs are accepted.
         </p>
       </header>
-      <InquiryForm initialProductId={initialProductId} />
+      <UiModeSwitcher mode={uiMode.mode} error={uiMode.error} />
+      <InquiryForm initialProductId={initialProductId} mode={uiMode.mode} />
     </div>
   );
 }
