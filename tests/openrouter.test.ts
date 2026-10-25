@@ -1,8 +1,12 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import {
   DEFAULT_OPENROUTER_BASE_URL,
+  isDisposableTestDataDir,
+  isTemporaryDataDir,
   normalizeOpenRouterKey,
   openRouterEndpoint,
   OpenRouterConfigError,
@@ -13,6 +17,7 @@ import {
 import type { StorageEnv } from "../src/server/storage";
 
 const servers: Server[] = [];
+const tempDataDir = join(tmpdir(), "ai-browser-lab-openrouter-test-data");
 
 function closeServer(server: Server): Promise<void> {
   return new Promise((resolve) => server.close(() => resolve()));
@@ -35,7 +40,7 @@ async function startMock(
     env: {
       LAB_TEST_MODE: "1",
       OPENROUTER_BASE_URL: baseUrl,
-      DATA_DIR: "/tmp/ai-browser-lab-openrouter-test-data",
+      DATA_DIR: tempDataDir,
     },
   };
 }
@@ -55,50 +60,97 @@ describe("OpenRouter base URL resolver", () => {
     expect(DEFAULT_OPENROUTER_BASE_URL).toBe("https://openrouter.ai/api/v1");
   });
 
-  it("allows a loopback override only in explicit test mode with DATA_DIR", async () => {
+  it("allows a loopback override only in explicit test mode with a temporary DATA_DIR", async () => {
     const { baseUrl, env } = await startMock((_request, response) => json(response, 200, { data: {} }));
     expect(resolveOpenRouterBaseUrl(env)).toBe(baseUrl);
+    expect(isTemporaryDataDir(tempDataDir)).toBe(true);
+    expect(isDisposableTestDataDir(tempDataDir)).toBe(true);
     expect(() =>
       resolveOpenRouterBaseUrl({ LAB_TEST_MODE: "1", OPENROUTER_BASE_URL: baseUrl }),
     ).toThrow(/DATA_DIR/);
     expect(() =>
-      resolveOpenRouterBaseUrl({ OPENROUTER_BASE_URL: baseUrl, DATA_DIR: "/tmp/x" }),
+      resolveOpenRouterBaseUrl({ OPENROUTER_BASE_URL: baseUrl, DATA_DIR: tempDataDir }),
     ).toThrow(/LAB_TEST_MODE/);
     expect(() =>
       resolveOpenRouterBaseUrl({
         LAB_TEST_MODE: "1",
-        DATA_DIR: "/tmp/x",
+        DATA_DIR: tempDataDir,
         OPENROUTER_BASE_URL: "http://192.168.1.10:4311/api/v1",
       }),
     ).toThrow(/loopback/);
     expect(() =>
       resolveOpenRouterBaseUrl({
         LAB_TEST_MODE: "1",
-        DATA_DIR: "/tmp/x",
+        DATA_DIR: tempDataDir,
         OPENROUTER_BASE_URL: "http://127.0.0.1/api/v1",
       }),
     ).toThrow(/explicit port/);
     expect(() =>
       resolveOpenRouterBaseUrl({
         LAB_TEST_MODE: "1",
-        DATA_DIR: "/tmp/x",
+        DATA_DIR: tempDataDir,
         OPENROUTER_BASE_URL: "http://user:pass@127.0.0.1:4311/api/v1",
       }),
     ).toThrow(/credentials/);
     expect(() =>
       resolveOpenRouterBaseUrl({
         LAB_TEST_MODE: "1",
-        DATA_DIR: "/tmp/x",
+        DATA_DIR: tempDataDir,
         OPENROUTER_BASE_URL: "http://127.0.0.1:4311/api/v1?x=1",
       }),
     ).toThrow(/query or fragment/);
     expect(
       resolveOpenRouterBaseUrl({
         LAB_TEST_MODE: "1",
-        DATA_DIR: "/tmp/x",
+        DATA_DIR: tempDataDir,
         OPENROUTER_BASE_URL: "http://127.0.0.1:4311/api/v1/",
       }),
     ).toBe("http://127.0.0.1:4311/api/v1");
+  });
+
+  it("rejects a mock override when DATA_DIR is the real project data directory", async () => {
+    const { baseUrl } = await startMock((_request, response) =>
+      json(response, 200, { data: {} }),
+    );
+    expect(isDisposableTestDataDir(join(process.cwd(), "data"))).toBe(false);
+    expect(() =>
+      resolveOpenRouterBaseUrl({
+        LAB_TEST_MODE: "1",
+        DATA_DIR: join(process.cwd(), "data"),
+        OPENROUTER_BASE_URL: baseUrl,
+      }),
+    ).toThrow(/temporary DATA_DIR/);
+    expect(() =>
+      resolveOpenRouterBaseUrl({
+        LAB_TEST_MODE: "1",
+        DATA_DIR: join(tmpdir(), "..", "ai-browser-lab-outside-temp"),
+        OPENROUTER_BASE_URL: baseUrl,
+      }),
+    ).toThrow(/temporary DATA_DIR/);
+  });
+
+  it("rejects the project data directory even when the repository is below a temp root", async () => {
+    const { baseUrl } = await startMock((_request, response) =>
+      json(response, 200, { data: {} }),
+    );
+    const fakeRepo = join(tmpdir(), "ai-browser-lab-fake-repo");
+    const fakeRepoData = join(fakeRepo, "data");
+    expect(isTemporaryDataDir(fakeRepoData)).toBe(true);
+    expect(isDisposableTestDataDir(fakeRepoData, fakeRepo)).toBe(false);
+    expect(isDisposableTestDataDir(fakeRepo, fakeRepo)).toBe(false);
+    expect(
+      isDisposableTestDataDir(join(tmpdir(), "ai-browser-lab-e2e-data"), fakeRepo),
+    ).toBe(true);
+    expect(() =>
+      resolveOpenRouterBaseUrl(
+        {
+          LAB_TEST_MODE: "1",
+          DATA_DIR: fakeRepoData,
+          OPENROUTER_BASE_URL: baseUrl,
+        },
+        fakeRepo,
+      ),
+    ).toThrow(/outside the project directory/);
   });
 
   it("builds endpoint URLs and rejects malformed keys", () => {

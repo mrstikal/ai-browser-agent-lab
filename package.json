@@ -17,7 +17,8 @@
     "check:runtime": "node scripts/check-node.mjs",
     "smoke:browser-local": "node scripts/check-node.mjs && tsx scripts/browser-smoke.ts",
     "test:agent": "node scripts/check-node.mjs && tsx scripts/agent-model-smoke.ts",
-    "test:e2e": "node scripts/check-node.mjs && node scripts/run-e2e.mjs"
+    "test:e2e": "node scripts/check-node.mjs && node scripts/run-e2e.mjs",
+    "smoke:built-worker": "node scripts/check-node.mjs && tsx scripts/built-worker-smoke.ts"
   },
   "dependencies": {
     "@browser_use/pi": "0.1.0",

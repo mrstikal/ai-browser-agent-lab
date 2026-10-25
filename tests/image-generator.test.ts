@@ -80,7 +80,7 @@ async function startMock(
     env: {
       LAB_TEST_MODE: "1",
       OPENROUTER_BASE_URL: `http://127.0.0.1:${address.port}/api/v1`,
-      DATA_DIR: "/tmp/ai-browser-lab-generator-test-data",
+      DATA_DIR: join(tmpdir(), "ai-browser-lab-generator-test-data"),
     },
     requests,
   };
@@ -555,6 +555,16 @@ describe("one-image adapter", () => {
         OPENROUTER_BASE_URL: "http://192.168.1.10:4311/api/v1",
       }),
     ).rejects.toThrow(OpenRouterConfigError);
+
+    // A real remembered key lives in the project's normal data directory; the
+    // mock override must refuse that directory even in explicit test mode.
+    await expect(
+      run(storage, {
+        LAB_TEST_MODE: "1",
+        DATA_DIR: join(process.cwd(), "data"),
+        OPENROUTER_BASE_URL: mock.env.OPENROUTER_BASE_URL ?? "",
+      }),
+    ).rejects.toThrow(/temporary DATA_DIR/);
 
     expect(mock.requests).toEqual([]);
     const manifest = await loadImageManifest(storage);

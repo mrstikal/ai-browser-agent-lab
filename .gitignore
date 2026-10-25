@@ -12,3 +12,5 @@
 /.eslintcache
 *.tsbuildinfo
 .env*
+
+/decision-reviewer.md

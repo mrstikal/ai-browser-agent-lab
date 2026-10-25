@@ -1,4 +1,5 @@
 import { defineConfig } from "@playwright/test";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -15,6 +16,9 @@ const channel = process.env.PLAYWRIGHT_CHANNEL?.trim() || "chrome";
 
 export default defineConfig({
   testDir: "./tests/e2e",
+  // Keep traces, screenshots, and .last-run.json outside the repository so
+  // the dev server never watches test artifacts and the worktree stays clean.
+  outputDir: join(tmpdir(), "ai-browser-lab-e2e-artifacts"),
   fullyParallel: false,
   workers: 1,
   forbidOnly: Boolean(process.env.CI),

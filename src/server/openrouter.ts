@@ -1,3 +1,6 @@
+import { realpathSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import type { StorageEnv } from "./storage";
 
 export const DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
@@ -23,11 +26,71 @@ export class OpenRouterKeyFormatError extends Error {
 }
 
 /**
+ * Resolves symlinks for the deepest existing ancestor so a temp directory
+ * cannot be disguised as another location (or vice versa). Non-existing
+ * suffixes are appended after the canonical ancestor.
+ */
+function canonicalPath(path: string): string {
+  let current = resolve(path);
+  const suffix: string[] = [];
+  for (;;) {
+    try {
+      return resolve(realpathSync.native(current), ...suffix);
+    } catch {
+      const parent = dirname(current);
+      if (parent === current) return resolve(current, ...suffix);
+      suffix.unshift(basename(current));
+      current = parent;
+    }
+  }
+}
+
+function isStrictlyInside(root: string, candidate: string): boolean {
+  const rel = relative(root, candidate);
+  return rel.length > 0 && !rel.startsWith("..") && !isAbsolute(rel);
+}
+
+/**
+ * True only for a data directory below an OS temp root.
+ */
+export function isTemporaryDataDir(dataDir: string): boolean {
+  const candidate = canonicalPath(dataDir);
+  const roots = new Set<string>();
+  for (const root of [tmpdir(), "/tmp"]) {
+    try {
+      roots.add(canonicalPath(root));
+    } catch {
+      // A missing platform temp root simply cannot match.
+    }
+  }
+  return [...roots].some((root) => isStrictlyInside(root, candidate));
+}
+
+/**
+ * A disposable test data directory is below an OS temp root and outside the
+ * project tree. The project check also covers a repository checked out below a
+ * temp root, where its normal `data/` directory would otherwise pass the
+ * temp-root test and expose a remembered production key to a loopback mock.
+ */
+export function isDisposableTestDataDir(
+  dataDir: string,
+  projectRoot: string = process.cwd(),
+): boolean {
+  if (!isTemporaryDataDir(dataDir)) return false;
+  const root = canonicalPath(projectRoot);
+  const candidate = canonicalPath(dataDir);
+  return candidate !== root && !isStrictlyInside(root, candidate);
+}
+
+/**
  * The production base URL is fixed. A loopback mock override is accepted only
- * in explicit test mode with its own temporary DATA_DIR, so a real key cannot
+ * in explicit test mode with its own disposable DATA_DIR, so a real key cannot
  * be redirected to another server by setting one environment variable.
  */
-export function resolveOpenRouterBaseUrl(env: StorageEnv = process.env): string {
+export function resolveOpenRouterBaseUrl(
+  env: StorageEnv = process.env,
+  projectRoot: string = process.cwd(),
+): string {
   const configured = env.OPENROUTER_BASE_URL?.trim();
   if (!configured) return DEFAULT_OPENROUTER_BASE_URL;
 
@@ -36,9 +99,15 @@ export function resolveOpenRouterBaseUrl(env: StorageEnv = process.env): string 
       "OPENROUTER_BASE_URL is only allowed together with LAB_TEST_MODE=1 and a temporary DATA_DIR.",
     );
   }
-  if (!env.DATA_DIR?.trim()) {
+  const dataDir = env.DATA_DIR?.trim();
+  if (!dataDir) {
     throw new OpenRouterConfigError(
       "OPENROUTER_BASE_URL requires an explicit temporary DATA_DIR in test mode.",
+    );
+  }
+  if (!isDisposableTestDataDir(dataDir, projectRoot)) {
+    throw new OpenRouterConfigError(
+      "OPENROUTER_BASE_URL requires a temporary DATA_DIR below the OS temp directory and outside the project directory in test mode.",
     );
   }
 
