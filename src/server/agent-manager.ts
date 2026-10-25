@@ -14,7 +14,6 @@ import {
   AGENT_WORKER_MAX_HEARTBEAT_MS,
   agentRunLimitsSchema,
   agentWorkerMessageSchema,
-  isObservedBrowserToolEvent,
   type AgentRunLimits,
   type AgentWorkerEventMessage,
   type AgentWorkerResultMessage,
@@ -85,6 +84,18 @@ export const AGENT_WORKER_STDERR_LIMIT = 8_192;
  */
 export const AGENT_WATCHDOG_MARGIN_MS = 5_000;
 export const AGENT_CANCEL_GRACE_MS = 10_000;
+export const AGENT_TEARDOWN_TIMEOUT_MS = 15_000;
+
+function teardownTimeoutMs(): number {
+  const raw = process.env.AGENT_TEARDOWN_TIMEOUT_MS;
+  if (process.env.LAB_TEST_MODE !== "1" || !raw) {
+    return AGENT_TEARDOWN_TIMEOUT_MS;
+  }
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) && parsed >= 50 && parsed <= 120_000
+    ? parsed
+    : AGENT_TEARDOWN_TIMEOUT_MS;
+}
 
 /** Fixed, bounded verification job limits; independent of the run-task UI. */
 export const AGENT_VERIFICATION_LIMITS: AgentRunLimits = Object.freeze({
@@ -511,17 +522,40 @@ export async function loadAgentStatus(
   };
 }
 
+const PROVIDER_CREDENTIAL_ENV =
+  /(?:^|_)(?:API_KEY|AUTH_TOKEN|OAUTH_TOKEN|TOKEN|ACCESS_KEY_ID|SECRET_ACCESS_KEY|SESSION_TOKEN)$/i;
+
 function buildWorkerEnv(env: StorageEnv, key: string): NodeJS.ProcessEnv {
   const overrides: Record<string, string> = {};
   for (const [name, value] of Object.entries(env)) {
     if (typeof value === "string" && value.length > 0) overrides[name] = value;
   }
-  return {
+  const childEnv: NodeJS.ProcessEnv = {
     ...process.env,
     ...overrides,
     OPENROUTER_API_KEY: key,
     NEXT_TELEMETRY_DISABLED: "1",
   };
+  // The SDK selects a provider from the model prefix and can read that
+  // provider's ambient key. Only the app-owned OpenRouter key may cross the
+  // worker boundary; unrelated cloud/provider credentials stay in the server.
+  for (const name of Object.keys(childEnv)) {
+    if (name === "OPENROUTER_API_KEY") continue;
+    if (PROVIDER_CREDENTIAL_ENV.test(name)) {
+      delete childEnv[name];
+    }
+  }
+  for (const name of [
+    "AWS_PROFILE",
+    "AWS_DEFAULT_PROFILE",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "GOOGLE_CLOUD_PROJECT",
+    "GCLOUD_PROJECT",
+    "CLOUDSDK_CONFIG",
+  ]) {
+    delete childEnv[name];
+  }
+  return childEnv;
 }
 
 function waitForSpawn(
@@ -669,6 +703,17 @@ export async function startAgentRun(
         message: "The task preset instruction exceeds the task length cap.",
       };
     }
+  } else {
+    // Custom instructions do not carry an origin. Without it the browser
+    // starts blank and the model has no port or trusted URL to open.
+    const prefix = `Start at ${config.origin}.`;
+    if (task.length + prefix.length + 1 > AGENT_WORKER_MAX_TASK_CHARS) {
+      return {
+        status: "invalid-request",
+        message: "The task plus the application start URL exceeds the task length cap.",
+      };
+    }
+    task = `${prefix}\n${task}`;
   }
 
   let command: AgentWorkerCommand;
@@ -689,7 +734,10 @@ export async function startAgentRun(
     lock = await acquireLock(storage, PAID_JOB_LOCK_SEGMENTS, {
       kind: AGENT_RUN_LOCK_KIND,
       ownerId: runId,
-      releaseOnExit: true,
+      // The worker is detached and can outlive this process. Releasing the
+      // lock on a graceful server exit would let a new paid operation start
+      // beside an orphaned browser; recovery owns it instead.
+      releaseOnExit: false,
     });
   } catch (error) {
     if (error instanceof LockHeldError) {
@@ -822,6 +870,8 @@ export async function startAgentRun(
     vision: "unverified",
     evaluation: { status: "not_evaluated", reason: null },
     uiEvidence: "unverified",
+    navigationObserved: false,
+    finalUrl: null,
     worker: null,
     eventCount: 0,
     lastSeq: 0,
@@ -885,6 +935,8 @@ export async function startAgentRun(
   let watchdogTimer: NodeJS.Timeout | undefined;
   let graceTimer: NodeJS.Timeout | undefined;
   let heartbeatTimer: NodeJS.Timeout | undefined;
+  let teardownTimer: NodeJS.Timeout | undefined;
+  let teardownStarted = false;
   let lastHeartbeatAtMs = performance.now();
   let startedSeen = false;
   const heartbeatMs =
@@ -895,9 +947,11 @@ export async function startAgentRun(
     if (watchdogTimer !== undefined) clearTimeout(watchdogTimer);
     if (graceTimer !== undefined) clearTimeout(graceTimer);
     if (heartbeatTimer !== undefined) clearInterval(heartbeatTimer);
+    if (teardownTimer !== undefined) clearTimeout(teardownTimer);
     watchdogTimer = undefined;
     graceTimer = undefined;
     heartbeatTimer = undefined;
+    teardownTimer = undefined;
   };
 
   const startHeartbeatWatch = (): void => {
@@ -939,7 +993,8 @@ export async function startAgentRun(
   };
 
   const forceTerminateHungRun = async (): Promise<void> => {
-    if (finished) return;
+    if (finished || teardownStarted) return;
+    teardownStarted = true;
     const profileDir = storage.path(["browser-profiles", runId]);
     let termination: AgentGroupTermination;
     try {
@@ -966,11 +1021,13 @@ export async function startAgentRun(
         );
       });
       if (finished) return;
-      markFailed(
-        termination.status === "terminated"
-          ? `The worker did not answer the cancel; its verified process group was force-terminated (${termination.signals.join(", ")}).`
-          : "The worker did not answer the cancel; its process group was already gone.",
-      );
+      if (!isTerminalAgentRunStatus(record.status)) {
+        markFailed(
+          termination.status === "terminated"
+            ? `The worker did not answer the cancel; its verified process group was force-terminated (${termination.signals.join(", ")}).`
+            : "The worker did not answer the cancel; its process group was already gone.",
+        );
+      }
       await finish();
       return;
     }
@@ -1028,6 +1085,19 @@ export async function startAgentRun(
     watchdogTimer.unref?.();
   };
 
+  const armTeardownWatchdog = (): void => {
+    if (teardownTimer !== undefined || finished || !record.worker) return;
+    teardownTimer = setTimeout(() => {
+      teardownTimer = undefined;
+      if (finished) return;
+      console.error(
+        `[agent-supervisor] Agent run ${runId} reported a terminal result but its worker or browser did not finish cleanup in time; forcing verified cleanup.`,
+      );
+      void forceTerminateHungRun();
+    }, teardownTimeoutMs());
+    teardownTimer.unref?.();
+  };
+
   const sendCancelMessage = (reason: AgentRunCancelReason): void => {
     try {
       child.send({
@@ -1048,9 +1118,14 @@ export async function startAgentRun(
   };
 
   const requestCancel = (reason: AgentRunCancelReason): CancelRequestOutcome => {
-    // The record turns terminal slightly before the child exits; a cancel for
-    // a finished run must not arm timers or claim a state change.
-    if (isTerminalAgentRunStatus(record.status)) return "finished";
+    // A terminal record can still own a live worker while the browser is
+    // closing. A late cancel must escalate that cleanup, not claim it is done.
+    if (isTerminalAgentRunStatus(record.status)) {
+      if (finished) return "finished";
+      sendCancelMessage(reason);
+      void forceTerminateHungRun();
+      return "hung";
+    }
     if (record.status === "hung") {
       // Past the grace period: the cooperative path is exhausted, but a
       // recovered worker may still honor a late cancel before Phase 26 acts.
@@ -1100,6 +1175,7 @@ export async function startAgentRun(
     record.endedAt = endedAt;
     record.updatedAt = endedAt;
     persistRecord();
+    armTeardownWatchdog();
   };
 
   const markCompleted = (message: AgentWorkerResultMessage): void => {
@@ -1123,13 +1199,16 @@ export async function startAgentRun(
       );
     }
     record.usage = message.usage;
-    record.imageInputObserved =
-      record.imageInputObserved || message.imageInputObserved;
+    record.imageInputObserved = message.imageInputObserved;
     record.vision = record.imageInputObserved ? "observed" : "unverified";
+    record.uiEvidence = message.pageActionObserved ? "observed" : "unverified";
+    record.navigationObserved = message.navigationObserved;
+    record.finalUrl = message.finalUrl;
     const endedAt = now().toISOString();
     record.endedAt = endedAt;
     record.updatedAt = endedAt;
     persistRecord();
+    armTeardownWatchdog();
   };
 
   let acceptedSeq = 0;
@@ -1141,25 +1220,11 @@ export async function startAgentRun(
     if (message.seq <= acceptedSeq) return;
     acceptedSeq = message.seq;
     acceptedEvents += 1;
-    if (message.imageContent === true) record.imageInputObserved = true;
     void enqueue(async () => {
       try {
         await appendAgentEvent(storage, message);
         record.eventCount += 1;
         record.lastSeq = Math.max(record.lastSeq, message.seq);
-        // UI evidence is only claimed for a successfully persisted browser
-        // JavaScript tool event. The SDK does not expose page-action events, so
-        // this is trace evidence that a browser tool ran, not proof that the
-        // cell used a page primitive. Delivery tools such as `finish` are not
-        // UI use, and business evaluation stays a separate field.
-        if (
-          isObservedBrowserToolEvent(message) &&
-          record.uiEvidence !== "observed"
-        ) {
-          // The terminal save persists this field. A nested persist here could
-          // land after the settle hook and overwrite its evaluation.
-          record.uiEvidence = "observed";
-        }
       } catch {
         // Counts only advance for events that really reached disk; the first
         // failure marks the trace incomplete for both terminal paths.
@@ -1395,9 +1460,25 @@ export async function startAgentRun(
 
   record.worker = workerIdentity;
   record.updatedAt = now().toISOString();
-  await enqueue(async () => {
-    await saveAgentRun(storage, { ...record });
-  }).catch(() => undefined);
+  try {
+    await enqueue(async () => {
+      await saveAgentRun(storage, { ...record });
+    });
+  } catch (error) {
+    const message = `The worker identity could not be persisted; the paid run was not started: ${messageOf(error)}`;
+    markFailed(message);
+    try {
+      child.kill("SIGTERM");
+    } catch {
+      // The teardown watchdog owns an unkillable child and keeps the lock.
+    }
+    await writeChain.catch(() => undefined);
+    return {
+      status: "failed",
+      run: { ...record },
+      message: record.error ?? message,
+    };
+  }
 
   if (statusNow() === "failed") {
     return {

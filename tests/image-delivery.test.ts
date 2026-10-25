@@ -44,7 +44,7 @@ async function publishImage(
   });
   const filename = buildAttemptFilename(productId, id, "png");
   await storage.writeFile(["images", filename], bytes);
-  const validated = validateImageBytes(bytes, { filename });
+  const validated = await validateImageBytes(bytes, { filename });
   manifest = publishAttempt(manifest, productId, id, {
     filename,
     validation: validated,
@@ -147,10 +147,11 @@ describe("validated image delivery", () => {
       startedAt: new Date(Date.now() - 5000),
     });
     const jpegName = buildAttemptFilename("P01", jpegId, "jpeg");
-    await storage.writeFile(["images", jpegName], jpegBytes(40, 30));
+    const jpeg = await jpegBytes(40, 30);
+    await storage.writeFile(["images", jpegName], jpeg);
     manifest = publishAttempt(manifest, "P01", jpegId, {
       filename: jpegName,
-      validation: validateImageBytes(jpegBytes(40, 30), { filename: jpegName }),
+      validation: await validateImageBytes(jpeg, { filename: jpegName }),
       publishedAt: new Date(),
       finishedAt: new Date(),
     });
@@ -166,11 +167,11 @@ describe("validated image delivery", () => {
       startedAt: new Date(Date.now() - 5000),
     });
     const webpName = buildAttemptFilename("P02", webpId, "webp");
-    const webpBytes = webpVp8lBytes(48, 32);
+    const webpBytes = await webpVp8lBytes(48, 32);
     await storage.writeFile(["images", webpName], webpBytes);
     manifest = publishAttempt(manifest, "P02", webpId, {
       filename: webpName,
-      validation: validateImageBytes(webpBytes, { filename: webpName }),
+      validation: await validateImageBytes(webpBytes, { filename: webpName }),
       publishedAt: new Date(),
       finishedAt: new Date(),
     });

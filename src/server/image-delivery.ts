@@ -77,7 +77,7 @@ export async function loadDeliverableImageBytes(
     const bytes = await storage.readFile(["images", active.filename]);
     if (bytes === undefined) return null;
 
-    const validated = validateImageBytes(bytes, { filename: active.filename });
+    const validated = await validateImageBytes(bytes, { filename: active.filename });
     if (
       validated.format !== active.format ||
       validated.mediaType !== active.mediaType ||

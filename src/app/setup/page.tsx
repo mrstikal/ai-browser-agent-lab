@@ -36,9 +36,10 @@ export default async function SetupPage() {
         </p>
         <h1 className="text-3xl font-semibold tracking-tight">Setup</h1>
         <p className="max-w-2xl text-slate-600">
-          Validate an OpenRouter key, choose image and browser models, review the current image
-          estimate, and confirm it. The quote uses only non-billable metadata requests; this phase
-          never starts a paid batch.
+          Validate an OpenRouter key, choose image and browser models, and review the current
+          image estimate. Quote and key checks are non-billable metadata requests; image
+          generation is a separate paid batch that starts only after you explicitly confirm the
+          displayed estimate.
         </p>
       </header>
 

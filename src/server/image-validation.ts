@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import sharp from "sharp";
 import type { ProductId } from "../lib/products";
 
 export const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
@@ -178,12 +179,28 @@ function parsePng(bytes: Uint8Array): { width: number; height: number } {
   const width = readUInt32BE(bytes, 16);
   const height = readUInt32BE(bytes, 20);
   if (width === 0 || height === 0) corrupt("PNG has zero dimensions.");
-  if (
-    readUInt32BE(bytes, bytes.length - 12) !== 0 ||
-    ascii(bytes, bytes.length - 8, bytes.length - 4) !== "IEND"
-  ) {
-    corrupt("PNG is missing its IEND chunk.");
+
+  let offset = 8;
+  let sawIdat = false;
+  let sawIend = false;
+  while (offset + 12 <= bytes.length) {
+    const length = readUInt32BE(bytes, offset);
+    if (offset + 12 + length > bytes.length) {
+      corrupt("PNG contains a truncated chunk.");
+    }
+    const type = ascii(bytes, offset + 4, offset + 8);
+    if (type === "IDAT" && length > 0) sawIdat = true;
+    if (type === "IEND") {
+      if (length !== 0 || offset + 12 !== bytes.length) {
+        corrupt("PNG IEND chunk is invalid or has trailing bytes.");
+      }
+      sawIend = true;
+      break;
+    }
+    offset += 12 + length;
   }
+  if (!sawIdat) corrupt("PNG has no IDAT image data.");
+  if (!sawIend) corrupt("PNG is missing its IEND chunk.");
   return { width, height };
 }
 
@@ -208,6 +225,7 @@ function parseJpeg(bytes: Uint8Array): { width: number; height: number } {
 
   let offset = 2;
   let dimensions: { width: number; height: number } | undefined;
+  let sawScan = false;
   while (offset + 1 < bytes.length) {
     if (bytes[offset] !== 0xff) corrupt("Invalid JPEG marker prefix.");
     let markerOffset = offset + 1;
@@ -221,6 +239,15 @@ function parseJpeg(bytes: Uint8Array): { width: number; height: number } {
     if (marker === 0xd9) break;
     if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue;
     if (marker === 0xda) {
+      if (offset + 2 > bytes.length - 2) {
+        corrupt("JPEG scan header is truncated.");
+      }
+      const length = readUInt16BE(bytes, offset);
+      const scanStart = offset + length;
+      if (length < 2 || scanStart >= bytes.length - 2) {
+        corrupt("JPEG scan has no entropy-coded image data.");
+      }
+      sawScan = true;
       break;
     }
 
@@ -238,6 +265,7 @@ function parseJpeg(bytes: Uint8Array): { width: number; height: number } {
     offset += length;
   }
 
+  if (!sawScan) corrupt("JPEG is missing an image scan.");
   if (!dimensions) corrupt("JPEG is missing a supported SOF segment.");
   if (dimensions.width === 0 || dimensions.height === 0) {
     corrupt("JPEG has zero dimensions.");
@@ -255,15 +283,42 @@ function parseWebp(bytes: Uint8Array): { width: number; height: number } {
     corrupt("Invalid WebP RIFF size.");
   }
 
-  const chunkType = ascii(bytes, 12, 16);
-  const chunkSize = readUInt32LE(bytes, 16);
-  const dataOffset = 20;
-  if (chunkSize < 1 || dataOffset + chunkSize > bytes.length) {
-    corrupt("Invalid WebP chunk size.");
+  const chunks: Array<{
+    readonly type: string;
+    readonly offset: number;
+    readonly size: number;
+  }> = [];
+  let offset = 12;
+  while (offset + 8 <= bytes.length) {
+    const type = ascii(bytes, offset, offset + 4);
+    const size = readUInt32LE(bytes, offset + 4);
+    const dataOffset = offset + 8;
+    if (dataOffset + size > bytes.length) {
+      corrupt("Invalid WebP chunk size.");
+    }
+    chunks.push({ type, offset: dataOffset, size });
+    offset = dataOffset + size + (size % 2);
   }
+  if (offset !== bytes.length) corrupt("WebP has trailing or truncated chunk data.");
+
+  const first = chunks[0];
+  if (!first) corrupt("WebP has no chunks.");
+  const chunkType = first.type;
+  const chunkSize = first.size;
+  const dataOffset = first.offset;
+  if (chunkSize < 1) corrupt("Invalid WebP chunk size.");
+
+  const hasImagePayload = chunks.some(
+    (chunk) =>
+      chunk.size > 0 &&
+      (chunk.type === "VP8 " || chunk.type === "VP8L" || chunk.type === "ANMF"),
+  );
 
   if (chunkType === "VP8X") {
     if (chunkSize < 10) corrupt("WebP VP8X chunk is too short.");
+    if (!hasImagePayload) {
+      corrupt("WebP VP8X container has no image payload.");
+    }
     return {
       width: 1 + readUInt24LE(bytes, dataOffset + 4),
       height: 1 + readUInt24LE(bytes, dataOffset + 7),
@@ -323,10 +378,63 @@ function detectFormat(bytes: Uint8Array): ImageFormat {
   );
 }
 
-export function validateImageBytes(
+const DECODE_CACHE_LIMIT = 64;
+const decodeCache = new Map<
+  string,
+  { readonly format: ImageFormat; readonly width: number; readonly height: number }
+>();
+
+/**
+ * A header is not an image. Force a bounded libvips decode of the actual
+ * pixel payload and use the decoded metadata as the authority; structural
+ * parsing above only rejects malformed containers early.
+ */
+async function decodeDimensions(
+  bytes: Uint8Array,
+  format: ImageFormat,
+): Promise<{ readonly width: number; readonly height: number }> {
+  try {
+    const image = sharp(bytes, {
+      failOn: "error",
+      limitInputPixels: MAX_IMAGE_DIMENSION * MAX_IMAGE_DIMENSION,
+      sequentialRead: true,
+    });
+    const metadata = await image.metadata();
+    if (metadata.format !== format) {
+      corrupt(
+        `Image bytes are ${metadata.format ?? "an unknown format"}, not ${format}.`,
+      );
+    }
+    const width = metadata.width;
+    const height = metadata.height;
+    if (
+      typeof width !== "number" ||
+      typeof height !== "number" ||
+      !Number.isInteger(width) ||
+      !Number.isInteger(height) ||
+      width < 1 ||
+      height < 1
+    ) {
+      corrupt("The image decoder did not report usable dimensions.");
+    }
+    // Decode into a single bounded pixel so a compressed bomb cannot allocate
+    // the full image while still proving that the payload is decodable.
+    await image.resize(1, 1, { fit: "inside" }).raw().toBuffer();
+    return { width, height };
+  } catch (error) {
+    if (error instanceof ImageValidationError) throw error;
+    corrupt(
+      `The image payload could not be decoded (${
+        error instanceof Error ? error.message : "unknown decoder error"
+      }).`,
+    );
+  }
+}
+
+export async function validateImageBytes(
   bytes: Uint8Array,
   options: { readonly filename?: string | undefined } = {},
-): ValidatedImage {
+): Promise<ValidatedImage> {
   if (bytes.byteLength === 0) {
     throw new ImageValidationError("empty", "Image data is empty.");
   }
@@ -367,6 +475,23 @@ export function validateImageBytes(
     }
   }
 
+  const sha256 = createHash("sha256").update(bytes).digest("hex");
+  let decoded = decodeCache.get(sha256);
+  if (!decoded || decoded.format !== format) {
+    const result = await decodeDimensions(bytes, format);
+    decoded = { format, width: result.width, height: result.height };
+    if (decodeCache.size >= DECODE_CACHE_LIMIT) {
+      const oldest = decodeCache.keys().next().value;
+      if (oldest !== undefined) decodeCache.delete(oldest);
+    }
+    decodeCache.set(sha256, decoded);
+  }
+  if (decoded.width !== dimensions.width || decoded.height !== dimensions.height) {
+    corrupt(
+      `The image decoder reported ${decoded.width}x${decoded.height}, but the container declared ${dimensions.width}x${dimensions.height}.`,
+    );
+  }
+
   return {
     format,
     mediaType: mediaTypeForFormat(format),
@@ -374,6 +499,6 @@ export function validateImageBytes(
     width: dimensions.width,
     height: dimensions.height,
     sizeBytes: bytes.byteLength,
-    sha256: createHash("sha256").update(bytes).digest("hex"),
+    sha256,
   };
 }

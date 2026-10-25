@@ -285,6 +285,43 @@ describe("agent restart recovery", () => {
     });
   });
 
+  it("recovers a completed run whose worker was still closing at crash time", async () => {
+    const storage = await makeStorage();
+    const runId = randomUUID();
+    const profileDir = storage.path(["browser-profiles", runId]);
+    const orphan = spawnOrphan(profileDir);
+    const pid = orphan.pid ?? 0;
+    expect(pid).toBeGreaterThan(0);
+    await saveAgentRun(
+      storage,
+      runRecord({
+        runId,
+        status: "completed",
+        stopReason: "completed",
+        endedAt: new Date().toISOString(),
+        worker: await identityOf(pid, pid),
+      }),
+    );
+    await writeStaleLock(storage, runId);
+
+    const report = await recoverInterruptedAgentState({
+      storage,
+      ...FAST_GRACES,
+    });
+    expect(report.runs[0]).toMatchObject({
+      runId,
+      previousStatus: "completed",
+      outcome: "terminated",
+      lock: "released",
+    });
+    await waitForExit(pid);
+    expect(
+      await storage.readJson<unknown>(PAID_JOB_LOCK_SEGMENTS),
+    ).toBeUndefined();
+    const run = await loadAgentRun(storage, runId);
+    expect(run?.status).toBe("completed");
+  });
+
   it("terminates a live orphan group before releasing the lock", async () => {
     const storage = await makeStorage();
     const runId = randomUUID();

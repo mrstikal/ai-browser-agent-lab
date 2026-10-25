@@ -1,6 +1,6 @@
 import { invalidateAgentCompatibility } from "./agent-compatibility";
 import { normalizeOpenRouterKey } from "./openrouter";
-import { assertNoActivePaidOperation } from "./paid-operation";
+import { withExclusivePaidOperation } from "./paid-operation";
 import { createStorage, Storage, type StorageEnv } from "./storage";
 
 export const OPENROUTER_KEY_SEGMENTS = ["secrets", "openrouter-key"] as const;
@@ -147,27 +147,27 @@ export async function setOpenRouterKey(
   options: SetOpenRouterKeyOptions,
 ): Promise<KeyStatus> {
   const normalized = normalizeOpenRouterKey(key);
-  assertNoActivePaidOperation();
-
   const storage = options.storage ?? createStorage(options.env ?? process.env);
-  await invalidateAgentCompatibility(storage);
+  return withExclusivePaidOperation("credentials", async () => {
+    await invalidateAgentCompatibility(storage);
 
-  const state = holder();
-  if (options.remember) {
-    await storage.writeFile(OPENROUTER_KEY_SEGMENTS, normalized);
+    const state = holder();
+    if (options.remember) {
+      await storage.writeFile(OPENROUTER_KEY_SEGMENTS, normalized);
+      state.key = normalized;
+      state.source = "file";
+      state.loaded = true;
+      await sweepKeyTemps(storage);
+      return { keyAvailable: true, source: "file" };
+    }
+
+    await storage.deleteFile(OPENROUTER_KEY_SEGMENTS);
     state.key = normalized;
-    state.source = "file";
+    state.source = "memory";
     state.loaded = true;
     await sweepKeyTemps(storage);
-    return { keyAvailable: true, source: "file" };
-  }
-
-  await storage.deleteFile(OPENROUTER_KEY_SEGMENTS);
-  state.key = normalized;
-  state.source = "memory";
-  state.loaded = true;
-  await sweepKeyTemps(storage);
-  return { keyAvailable: true, source: "memory" };
+    return { keyAvailable: true, source: "memory" };
+  });
 }
 
 // Test-only: drops the process holder so each test starts from no key.
@@ -191,16 +191,16 @@ export interface DeleteOpenRouterKeyOptions {
 export async function deleteOpenRouterKey(
   options: DeleteOpenRouterKeyOptions = {},
 ): Promise<KeyStatus> {
-  assertNoActivePaidOperation();
-
   const storage = options.storage ?? createStorage(options.env ?? process.env);
-  await invalidateAgentCompatibility(storage);
-  await storage.deleteFile(OPENROUTER_KEY_SEGMENTS);
+  return withExclusivePaidOperation("credentials", async () => {
+    await invalidateAgentCompatibility(storage);
+    await storage.deleteFile(OPENROUTER_KEY_SEGMENTS);
 
-  const state = holder();
-  state.key = undefined;
-  state.source = undefined;
-  state.loaded = true;
-  await sweepKeyTemps(storage);
-  return { keyAvailable: false, source: null };
+    const state = holder();
+    state.key = undefined;
+    state.source = undefined;
+    state.loaded = true;
+    await sweepKeyTemps(storage);
+    return { keyAvailable: false, source: null };
+  });
 }

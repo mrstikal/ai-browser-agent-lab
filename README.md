@@ -315,8 +315,8 @@ The dashboard keeps these concepts separate:
   interrupted, or hung.
 - **Business evaluation**: passed, failed, or not evaluated. Custom and verification runs
   are never automatically passed.
-- **UI evidence**: observed only when a persisted successful browser JavaScript tool event
-  exists. This is trace evidence, not cryptographic proof.
+- **UI evidence**: observed only when the SDK recording contains a browser page action
+  such as a navigation, click, or type. This is trace evidence, not cryptographic proof.
 
 A **full task pass** requires completed execution, a passed business evaluation, and
 observed UI evidence. A completed process alone is not a pass.

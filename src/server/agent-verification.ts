@@ -63,6 +63,21 @@ export function parseVerificationHeading(outputText: string | null): string | nu
   return trimmed;
 }
 
+function isVerificationPage(
+  finalUrl: string | null,
+  origin: string,
+): boolean {
+  if (finalUrl === null) return false;
+  try {
+    const actual = new URL(finalUrl);
+    const expected = new URL(origin);
+    const path = actual.pathname.replace(/\/+$/, "") || "/";
+    return actual.origin === expected.origin && path === "/shop";
+  } catch {
+    return false;
+  }
+}
+
 export function evaluateVerificationRun(
   record: AgentRunRecord,
 ): AgentVerificationEvaluation {
@@ -84,6 +99,13 @@ export function evaluateVerificationRun(
     return {
       status: "failed",
       reason: `The SDK stopped the verification run (${record.stopReason ?? "unknown"}).`,
+    };
+  }
+  if (!isVerificationPage(record.finalUrl ?? null, record.origin)) {
+    return {
+      status: "failed",
+      reason:
+        "The verification run did not finish on the configured /shop page, so browser navigation was not observed.",
     };
   }
   const heading = parseVerificationHeading(record.outputText);

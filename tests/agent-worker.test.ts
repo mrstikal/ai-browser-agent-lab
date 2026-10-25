@@ -382,6 +382,80 @@ describe("isolated agent worker", () => {
   );
 
   it(
+    "does not count an SDK error terminal frame as a page action",
+    { timeout: 30_000 },
+    async () => {
+      const base = await makeBase();
+      const dataDir = join(base, "data");
+      const markersDir = join(base, "markers");
+      for (const mode of ["error-recording", "incomplete-recording"]) {
+        const worker = startWorker(workerEnv(dataDir, markersDir, mode));
+        await worker.waitFor("ready");
+        worker.send(startMessage());
+        const result = await worker.waitFor("result");
+        await worker.waitForExit();
+
+        expect(result.status).toBe(
+          mode === "error-recording" ? "error" : "incomplete",
+        );
+        expect(result.pageActionObserved).toBe(false);
+        expect(result.navigationObserved).toBe(false);
+      }
+    },
+  );
+
+  it(
+    "does not claim vision when the run ends before another model request",
+    { timeout: 30_000 },
+    async () => {
+      const base = await makeBase();
+      const dataDir = join(base, "data");
+      const markersDir = join(base, "markers");
+      const worker = startWorker(
+        workerEnv(dataDir, markersDir, "vision-no-followup"),
+      );
+
+      await worker.waitFor("ready");
+      worker.send(startMessage());
+      const result = await worker.waitFor("result");
+      await worker.waitForExit();
+
+      expect(result.imageInputObserved).toBe(false);
+      const toolEnd = worker.messages.find(
+        (message) => message.type === "event" && message.kind === "tool_end",
+      );
+      expect(toolEnd?.imageContent).toBe(true);
+    },
+  );
+
+  it(
+    "terminates owned browser processes when the parent disconnects during a hung close",
+    { timeout: 30_000 },
+    async () => {
+      const base = await makeBase();
+      const dataDir = join(base, "data");
+      const markersDir = join(base, "markers");
+      const env = workerEnv(dataDir, markersDir, "close-hang");
+      env.AGENT_WORKER_ORPHAN_DEADLINE_MS = "200";
+      const worker = startWorker(env);
+
+      await worker.waitFor("ready");
+      worker.send(startMessage());
+      await worker.waitFor("result");
+      await waitForMarkerFile(markersDir, "close-grandchild.json");
+      const grandchild = await readMarker<{ pid: number }>(
+        markersDir,
+        "close-grandchild.json",
+      );
+
+      worker.child.disconnect();
+      const exit = await worker.waitForExit(15_000);
+      expect(exit.code).toBe(1);
+      expect(() => process.kill(grandchild.pid, 0)).toThrow();
+    },
+  );
+
+  it(
     "cancels a hanging mocked run and still closes the browser",
     { timeout: 30_000 },
     async () => {

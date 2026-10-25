@@ -208,6 +208,7 @@ function isFatalFailure(result: {
     result.code === "unauthorized" ||
     result.code === "insufficient-credit" ||
     result.code === "provider-mismatch" ||
+    result.code === "unsupported-format" ||
     result.code === "format-mismatch" ||
     result.code === "file-exists"
   ) {

@@ -19,7 +19,7 @@ import {
   agentUiModeSchema,
   type AgentUiMode,
 } from "../lib/agent-ui-mode";
-import { modelIdSchema } from "../lib/schemas";
+import { browserModelIdSchema } from "../lib/schemas";
 import { Storage, StorageCorruptionError } from "./storage";
 
 /**
@@ -120,7 +120,7 @@ export const agentRunRecordSchema = z
     /** Existing submission IDs captured before a form-task worker launch. */
     formBaseline: agentFormBaselineSchema.nullable().optional(),
     task: z.string().min(1).max(AGENT_WORKER_MAX_TASK_CHARS),
-    modelId: modelIdSchema,
+    modelId: browserModelIdSchema,
     origin: z.string().min(1).max(300),
     limits: agentRunLimitsSchema,
     status: agentRunLifecycleSchema,
@@ -137,6 +137,10 @@ export const agentRunRecordSchema = z
     vision: z.enum(["observed", "unverified"]),
     evaluation: agentRunEvaluationSchema,
     uiEvidence: z.enum(["observed", "unverified"]),
+    /** Actual Navigate page action recorded by the SDK; optional for old runs. */
+    navigationObserved: z.boolean().optional(),
+    /** URL the browser was on when the run ended; optional for old runs. */
+    finalUrl: z.string().max(300).nullable().optional(),
     worker: agentRunWorkerSchema.nullable(),
     eventCount: z.number().int().nonnegative(),
     lastSeq: z.number().int().nonnegative(),
@@ -194,6 +198,8 @@ export function normalizeAgentRunRecord(raw: RawAgentRunRecord): AgentRunRecord 
     cancelRequestedAt: raw.cancelRequestedAt ?? null,
     cancelReason: raw.cancelReason ?? null,
     watchdogExpiredAt: raw.watchdogExpiredAt ?? null,
+    navigationObserved: raw.navigationObserved ?? false,
+    finalUrl: raw.finalUrl ?? null,
   };
 }
 

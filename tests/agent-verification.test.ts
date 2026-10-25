@@ -160,6 +160,7 @@ async function waitForMarkerFile(
 }
 
 function makeRecord(overrides: Partial<AgentRunRecord> = {}): AgentRunRecord {
+  const origin = overrides.origin ?? "http://127.0.0.1:3000";
   return {
     version: AGENT_RUN_VERSION,
     runId: "11111111-1111-4111-8111-111111111111",
@@ -169,7 +170,7 @@ function makeRecord(overrides: Partial<AgentRunRecord> = {}): AgentRunRecord {
     formBaseline: null,
     task: "Read the Shop heading.",
     modelId: DEFAULT_BROWSER_MODEL_ID,
-    origin: "http://127.0.0.1:3000",
+    origin,
     limits: { ...AGENT_VERIFICATION_LIMITS },
     status: "completed",
     stopReason: "completed",
@@ -190,6 +191,7 @@ function makeRecord(overrides: Partial<AgentRunRecord> = {}): AgentRunRecord {
     vision: "unverified",
     evaluation: { status: "not_evaluated", reason: null },
     uiEvidence: "unverified",
+    finalUrl: `${origin}/shop`,
     worker: null,
     eventCount: 0,
     lastSeq: 0,
@@ -258,6 +260,11 @@ describe("verification evaluation", () => {
     expect(
       evaluateVerificationRun(makeRecord({ outputText: "The heading is Shop." }))
         .status,
+    ).toBe("failed");
+    expect(
+      evaluateVerificationRun(
+        makeRecord({ finalUrl: "http://127.0.0.1:3000/" }),
+      ).status,
     ).toBe("failed");
     expect(
       evaluateVerificationRun(makeRecord({ outputText: '{"heading":"Storefront"}' }))

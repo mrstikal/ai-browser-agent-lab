@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { imageModelSettingsSchema } from "@/lib/schemas";
-import { getKeyStatus, loadOpenRouterKey } from "@/server/credentials";
-import { startImageJob } from "@/server/image-job";
+import { loadOpenRouterKey } from "@/server/credentials";
+import { releaseAdmittedImageJob, startImageJob } from "@/server/image-job";
 import { startImageBatch } from "@/server/image-batch";
 import { ImageStateCorruptionError } from "@/server/image-state";
 import { readGuardedMutation } from "@/server/mutation-guard";
@@ -15,6 +15,7 @@ const startSchema = z.strictObject({
   fingerprint: z.string().regex(/^[0-9a-f]{64}$/),
   selection: imageModelSettingsSchema.optional(),
   selectedIds: z.array(z.string().min(1).max(16)).max(24).optional(),
+  intent: z.enum(["resume", "regenerate"]).optional(),
 });
 
 function failure(status: number, code: string, message: string): Response {
@@ -52,30 +53,16 @@ export async function POST(request: Request) {
   const guarded = await readGuardedMutation(request, { schema: startSchema });
   if (!guarded.ok) return guarded.response;
 
-  let keyAvailable: boolean;
-  let apiKey: string | undefined;
-  try {
-    keyAvailable = (await getKeyStatus()).keyAvailable;
-    apiKey = await loadOpenRouterKey();
-  } catch {
-    return failure(409, "key-required", "The stored key is unreadable. Validate it again.");
-  }
-  if (!keyAvailable || !apiKey) {
-    return failure(
-      409,
-      "key-required",
-      "Enter and validate an OpenRouter API key before starting a batch.",
-    );
-  }
-
+  const storage = createStorage();
   let result;
   try {
     result = await startImageJob({
-      storage: createStorage(),
-      apiKey,
+      storage,
+      loadApiKey: () => loadOpenRouterKey(),
       fingerprint: guarded.data.fingerprint,
       selection: guarded.data.selection,
       selectedIds: guarded.data.selectedIds,
+      intent: guarded.data.intent,
     });
   } catch (error) {
     if (error instanceof ImageStateCorruptionError) {
@@ -94,10 +81,26 @@ export async function POST(request: Request) {
 
   switch (result.status) {
     case "started": {
+      // The key is re-read while the admission marker still blocks credential
+      // changes, so the batch cannot bill a key deleted after the quote.
+      let apiKey: string | undefined;
+      try {
+        apiKey = await loadOpenRouterKey();
+      } catch {
+        apiKey = undefined;
+      }
+      if (!apiKey) {
+        await releaseAdmittedImageJob({ storage, jobId: result.job.jobId });
+        return failure(
+          409,
+          "key-required",
+          "The stored key is no longer readable. No paid request was made.",
+        );
+      }
       // Fire-and-forget: the worker holds the admitted lock and persists all
       // progress. Duplicate starts join this controller instead of forking it.
       void startImageBatch({
-        storage: createStorage(),
+        storage,
         jobId: result.job.jobId,
         apiKey,
       });

@@ -526,6 +526,7 @@ async function main(): Promise<number> {
         break;
       }
       let toolCalls = 0;
+      let pendingImage = false;
       let attemptImages = false;
       let result: RunResult<{ heading: string }>;
       try {
@@ -535,9 +536,12 @@ async function main(): Promise<number> {
           onEvent: (event: AgentEvent) => {
             if (event.type === "tool_execution_end") {
               toolCalls += 1;
-              if (containsImageContent(event.result)) {
-                attemptImages = true;
-              }
+              if (containsImageContent(event.result)) pendingImage = true;
+            }
+            // A tool image is model input only when a later turn actually
+            // sends it. Ending after the tool result stays unverified.
+            if (event.type === "turn_start" && pendingImage) {
+              attemptImages = true;
             }
           },
         });

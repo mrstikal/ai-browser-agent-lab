@@ -13,6 +13,7 @@ import {
 } from "./image-state";
 import {
   buildAttemptFilename,
+  ImageValidationError,
   MAX_IMAGE_BYTES,
   validateImageBytes,
   type ValidatedImage,
@@ -39,6 +40,7 @@ export type ImageGenerationFailureCode =
   | "timeout"
   | "invalid-response"
   | "image-invalid"
+  | "unsupported-format"
   | "format-mismatch"
   | "provider-mismatch"
   | "file-exists";
@@ -58,6 +60,7 @@ export interface ImageGenerationFailure {
   readonly productId: ProductId;
   readonly attemptId: string;
   readonly code: ImageGenerationFailureCode;
+  readonly cost?: ImageCost | undefined;
   readonly message: string;
   readonly httpStatus: number | null;
   readonly retryAfterSeconds: number | null;
@@ -105,6 +108,14 @@ function decodeBase64Image(value: unknown): Buffer | undefined {
   }
   if (buffer.toString("base64") !== cleaned) return undefined;
   return buffer;
+}
+
+function providerMatchesPin(responseProvider: string, pin: string): boolean {
+  return (
+    responseProvider === pin ||
+    responseProvider.startsWith(`${pin}/`) ||
+    pin.startsWith(`${responseProvider}/`)
+  );
 }
 
 function costFromUsage(usage: unknown): ImageCost | undefined {
@@ -240,7 +251,6 @@ async function generateOneImageLocked(input: {
       manifest: withStarted,
       productId: options.productId,
       attemptId,
-      now,
       code: "file-exists",
       httpStatus: null,
       message: `An image file for this attempt already exists (${existingFiles[0]}). Run startup reconciliation instead of overwriting it.`,
@@ -279,7 +289,6 @@ async function generateOneImageLocked(input: {
           manifest: withStarted,
           productId: options.productId,
           attemptId,
-          now,
           code: "unauthorized",
           httpStatus: 401,
           retryAfterSeconds,
@@ -293,7 +302,6 @@ async function generateOneImageLocked(input: {
           manifest: withStarted,
           productId: options.productId,
           attemptId,
-          now,
           code: "insufficient-credit",
           httpStatus: 402,
           retryAfterSeconds,
@@ -307,7 +315,6 @@ async function generateOneImageLocked(input: {
           manifest: withStarted,
           productId: options.productId,
           attemptId,
-          now,
           code: "rate-limited",
           httpStatus: 429,
           retryAfterSeconds,
@@ -320,7 +327,6 @@ async function generateOneImageLocked(input: {
         manifest: withStarted,
         productId: options.productId,
         attemptId,
-        now,
         code: "provider-error",
         httpStatus: fetched.status,
         retryAfterSeconds,
@@ -333,7 +339,6 @@ async function generateOneImageLocked(input: {
         manifest: withStarted,
         productId: options.productId,
         attemptId,
-        now,
         code: "timeout",
         httpStatus: null,
         message:
@@ -346,7 +351,6 @@ async function generateOneImageLocked(input: {
         manifest: withStarted,
         productId: options.productId,
         attemptId,
-        now,
         code: "network",
         httpStatus: null,
         message:
@@ -358,7 +362,6 @@ async function generateOneImageLocked(input: {
       manifest: withStarted,
       productId: options.productId,
       attemptId,
-      now,
       code: "invalid-response",
       httpStatus: null,
       message: "The provider response could not be parsed. Nothing was published.",
@@ -366,6 +369,9 @@ async function generateOneImageLocked(input: {
   }
 
   const parsed = fetched.json;
+  const reportedCost = costFromUsage(
+    isRecord(parsed) ? parsed.usage : undefined,
+  );
   const responseProvider =
     isRecord(parsed) && typeof parsed.provider === "string"
       ? parsed.provider
@@ -373,15 +379,15 @@ async function generateOneImageLocked(input: {
   if (
     responseProvider !== null &&
     options.providerOnly.length > 0 &&
-    !options.providerOnly.includes(responseProvider)
+    !options.providerOnly.some((pin) => providerMatchesPin(responseProvider, pin))
   ) {
     return failAttempt({
       storage,
       manifest: withStarted,
       productId: options.productId,
       attemptId,
-      now,
       code: "provider-mismatch",
+      cost: reportedCost,
       httpStatus: 200,
       message:
         "The provider response came from an endpoint outside the confirmed quote. Nothing was published.",
@@ -395,8 +401,8 @@ async function generateOneImageLocked(input: {
       manifest: withStarted,
       productId: options.productId,
       attemptId,
-      now,
       code: "invalid-response",
+      cost: reportedCost,
       httpStatus: 200,
       message: "The provider response did not contain image data. Nothing was published.",
     });
@@ -409,8 +415,8 @@ async function generateOneImageLocked(input: {
       manifest: withStarted,
       productId: options.productId,
       attemptId,
-      now,
       code: "invalid-response",
+      cost: reportedCost,
       httpStatus: 200,
       message: "The provider image data was malformed. Nothing was published.",
     });
@@ -419,15 +425,15 @@ async function generateOneImageLocked(input: {
   let filename: string;
   let image: ValidatedImage;
   try {
-    image = validateImageBytes(bytes);
+    image = await validateImageBytes(bytes);
     if (image.format !== options.selection.format) {
       return failAttempt({
         storage,
         manifest: withStarted,
         productId: options.productId,
         attemptId,
-        now,
         code: "format-mismatch",
+        cost: reportedCost,
         httpStatus: 200,
         message: `The provider returned ${image.mediaType} instead of the requested ${options.selection.format}. Nothing was published.`,
       });
@@ -439,8 +445,8 @@ async function generateOneImageLocked(input: {
         manifest: withStarted,
         productId: options.productId,
         attemptId,
-        now,
         code: "format-mismatch",
+        cost: reportedCost,
         httpStatus: 200,
         message: "The provider media type did not match the image bytes. Nothing was published.",
       });
@@ -450,15 +456,19 @@ async function generateOneImageLocked(input: {
       attemptId,
       image.format,
     );
-    image = validateImageBytes(bytes, { filename });
+    image = await validateImageBytes(bytes, { filename });
   } catch (error) {
     return failAttempt({
       storage,
       manifest: withStarted,
       productId: options.productId,
       attemptId,
-      now,
-      code: "image-invalid",
+      code:
+        error instanceof ImageValidationError &&
+        error.code === "unsupported-format"
+          ? "unsupported-format"
+          : "image-invalid",
+      cost: reportedCost,
       httpStatus: 200,
       message: `The returned image did not pass validation (${
         error instanceof Error ? error.message : "unknown reason"
@@ -475,8 +485,8 @@ async function generateOneImageLocked(input: {
         manifest: withStarted,
         productId: options.productId,
         attemptId,
-        now,
         code: "file-exists",
+        cost: reportedCost,
         httpStatus: 200,
         message: `The target file ${filename} already exists and was not overwritten.`,
       });
@@ -484,14 +494,13 @@ async function generateOneImageLocked(input: {
     throw error;
   }
 
-  const cost =
-    costFromUsage(isRecord(parsed) ? parsed.usage : undefined) ??
-    estimatedCost(options.estimatedUnitPriceUsd);
+  const cost = reportedCost ?? estimatedCost(options.estimatedUnitPriceUsd);
+  const publishedAt = new Date();
   const published = publishAttempt(withStarted, options.productId, attemptId, {
     filename,
     validation: image,
-    publishedAt: now,
-    finishedAt: now,
+    publishedAt,
+    finishedAt: publishedAt,
     cost,
   });
   await saveImageManifest(storage, published);
@@ -512,8 +521,8 @@ async function failAttempt(options: {
   readonly manifest: ImageManifest;
   readonly productId: ProductId;
   readonly attemptId: string;
-  readonly now: Date;
   readonly code: ImageGenerationFailureCode;
+  readonly cost?: ImageCost | undefined;
   readonly httpStatus: number | null;
   readonly message: string;
   readonly retryAfterSeconds?: number | null | undefined;
@@ -523,8 +532,9 @@ async function failAttempt(options: {
     options.productId,
     options.attemptId,
     {
-      finishedAt: options.now,
+      finishedAt: new Date(),
       error: options.message,
+      cost: options.cost,
     },
   );
   await saveImageManifest(options.storage, failed);
@@ -533,6 +543,7 @@ async function failAttempt(options: {
     productId: options.productId,
     attemptId: options.attemptId,
     code: options.code,
+    cost: options.cost,
     httpStatus: options.httpStatus,
     retryAfterSeconds: options.retryAfterSeconds ?? null,
     message: options.message,

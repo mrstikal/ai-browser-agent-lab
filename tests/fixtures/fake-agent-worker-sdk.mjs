@@ -170,13 +170,18 @@ function emitStandardEvents(options, task) {
     result: {
       content: [
         { type: "text", text: "Read the heading." },
-        ...(mode === "vision"
+        ...(mode === "vision" || mode === "vision-no-followup"
           ? [{ type: "image", data: "", mimeType: "image/png" }]
           : []),
       ],
     },
   });
+  if (mode !== "javascript-no-action") sawBrowserTool = true;
   options.onEvent?.({ type: "turn_end", message: {}, toolResults: [] });
+  if (mode === "vision") {
+    // A follow-up model request is what turns a tool image into model input.
+    options.onEvent?.({ type: "turn_start", turn: 2 });
+  }
   options.onEvent?.({ type: "agent_end", messages: [] });
 }
 
@@ -199,6 +204,40 @@ const headingAnswer =
 let lastOptions = null;
 let closeCount = 0;
 let cancelCount = 0;
+let currentTask = null;
+let sawBrowserTool = false;
+
+function attachRecording(result) {
+  if (
+    !sawBrowserTool &&
+    mode !== "error-recording" &&
+    mode !== "incomplete-recording"
+  ) {
+    return result;
+  }
+  if (!result || typeof result !== "object") return result;
+  const workspace = lastOptions?.workspace;
+  if (typeof workspace !== "string") return result;
+  const recordingPath = join(workspace, "fake-recording.json");
+  writeFileSync(
+    recordingPath,
+    JSON.stringify({
+      version: 1,
+      task: currentTask,
+      frames: [
+        { label: "Browser" },
+        ...(sawBrowserTool
+          ? [{ label: "Navigate" }, { label: "Click" }]
+          : []),
+        { label: typeof result.status === "string" ? result.status : "completed" },
+      ],
+      status: "completed",
+      warnings: [],
+      capped: false,
+    }),
+  );
+  return { ...result, recordingPath };
+}
 
 export const Browser = {
   chromium: (options) => ({ kind: "chromium", ...options }),
@@ -213,6 +252,17 @@ const agent = {
       maxCostUsd: options.maxCostUsd,
       hasSignal: options.signal instanceof AbortSignal,
     });
+    if (mode === "error-recording" || mode === "incomplete-recording") {
+      return {
+        status: mode === "error-recording" ? "error" : "incomplete",
+        text: "",
+        error: "The run failed after the recorder started.",
+        steps: 2,
+        durationMs: 5,
+        usage,
+        workspace: "",
+      };
+    }
     if (mode === "failure") {
       return {
         status: "error",
@@ -457,7 +507,20 @@ const agent = {
       workspace: "",
     };
   },
-  async execute() {
+  async execute(code) {
+    if (typeof code === "string" && code.includes("page.info")) {
+      const match =
+        typeof currentTask === "string"
+          ? currentTask.match(/https?:\/\/[^\s"'`]+\/shop\b/)
+          : null;
+      return {
+        text: JSON.stringify({
+          url:
+            match?.[0]?.replace(/[),.;]+$/, "") ?? "http://127.0.0.1:3000/",
+          title: "Shop",
+        }),
+      };
+    }
     return {};
   },
   cancel() {
@@ -473,6 +536,21 @@ const agent = {
       profileExistsAtClose:
         typeof profileDir === "string" && existsSync(profileDir),
     });
+    if (mode === "close-hang") {
+      if (typeof profileDir === "string") {
+        const grandchild = spawn(
+          process.execPath,
+          ["-e", "setInterval(() => {}, 1000)"],
+          {
+            argv0: `--user-data-dir=${profileDir}`,
+            stdio: "ignore",
+          },
+        );
+        grandchild.unref();
+        mark("close-grandchild.json", { pid: grandchild.pid ?? null });
+      }
+      await new Promise(() => {});
+    }
   },
 };
 
@@ -506,4 +584,11 @@ export const BrowserUse = {
     lastOptions = options;
     return agent;
   },
+};
+
+const runInner = agent.run.bind(agent);
+agent.run = async (task, options = {}) => {
+  currentTask = task;
+  sawBrowserTool = false;
+  return attachRecording(await runInner(task, options));
 };

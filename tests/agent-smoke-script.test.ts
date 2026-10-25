@@ -181,6 +181,22 @@ describe("agent model smoke live observations (mocked SDK)", () => {
     expect((await loadAgentCompatibility(storage))?.vision).toBe("observed");
   });
 
+  it("does not label vision from an image result with no follow-up turn", async () => {
+    const storage = await makeStorage();
+    await storage.writeFile(["secrets", "openrouter-key"], "sk-or-v1-remembered");
+    const origin = await startHealthServer();
+    const run = await runSmoke(
+      ["--live", "--approve-paid", "--approve-observation=1"],
+      fakeEnv(storage, origin, "vision-no-followup"),
+    );
+    expect(run.result).toMatchObject({
+      status: "Verified",
+      vision: "unverified",
+      stampWritten: true,
+    });
+    expect((await loadAgentCompatibility(storage))?.vision).toBe("unverified");
+  });
+
   it("requires a separate approval for the second observation", async () => {
     const storage = await makeStorage();
     await storage.writeFile(["secrets", "openrouter-key"], "sk-or-v1-remembered");

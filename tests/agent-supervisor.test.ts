@@ -376,7 +376,7 @@ describe("agent supervisor", () => {
       expect(run).toMatchObject({
         status: "running",
         kind: "task",
-        task: "Read the main heading.",
+        task: `Start at ${context.origin}.\nRead the main heading.`,
         modelId: DEFAULT_BROWSER_MODEL_ID,
         origin: context.origin,
         limits: AGENT_RUN_DEFAULT_LIMITS,
@@ -651,13 +651,62 @@ describe("agent supervisor", () => {
       expect(allowed.status).toBe("started");
       if (allowed.status !== "started") return;
       expect(allowed.run.kind).toBe("task");
-      expect(allowed.run.task).toBe("Read the main heading.");
+      expect(allowed.run.task).toBe(`Start at ${context.origin}.\nRead the main heading.`);
       const allowedFinished = await waitForTerminal(
         context.storage,
         allowed.run.runId,
       );
       await waitForIdle(context.storage);
       expect(allowedFinished.status).toBe("completed");
+    },
+  );
+
+  it(
+    "forces teardown when a worker reports a result but browser close hangs",
+    { timeout: 30_000 },
+    async () => {
+      const previousMode = process.env.LAB_TEST_MODE;
+      const previousTimeout = process.env.AGENT_TEARDOWN_TIMEOUT_MS;
+      process.env.LAB_TEST_MODE = "1";
+      process.env.AGENT_TEARDOWN_TIMEOUT_MS = "200";
+      try {
+        const context = await makeContext("close-hang");
+        await seedKey(context);
+        await seedStamp(context);
+        const started = await startAgentRun({
+          kind: "task",
+          task: "Read the main heading.",
+          env: context.env,
+          storage: context.storage,
+        });
+        expect(started.status).toBe("started");
+        if (started.status !== "started") return;
+
+        const finished = await waitForTerminal(
+          context.storage,
+          started.run.runId,
+        );
+        expect(finished.status).toBe("completed");
+        await waitForMarkerFile(context.markersDir, "close-grandchild.json");
+        const grandchild = await readMarker<{ pid: number }>(
+          context.markersDir,
+          "close-grandchild.json",
+        );
+
+        await waitForIdle(context.storage);
+        expect(
+          await readLockMetadata(context.storage.path(PAID_JOB_LOCK_SEGMENTS)),
+        ).toBeUndefined();
+        expect(() => process.kill(grandchild.pid, 0)).toThrow();
+      } finally {
+        if (previousMode === undefined) delete process.env.LAB_TEST_MODE;
+        else process.env.LAB_TEST_MODE = previousMode;
+        if (previousTimeout === undefined) {
+          delete process.env.AGENT_TEARDOWN_TIMEOUT_MS;
+        } else {
+          process.env.AGENT_TEARDOWN_TIMEOUT_MS = previousTimeout;
+        }
+      }
     },
   );
 
@@ -1681,7 +1730,7 @@ describe("agent supervisor", () => {
     "keeps a passing business result separate from unverified UI evidence",
     { timeout: 30_000 },
     async () => {
-      const context = await makeContext("catalog-no-events");
+      const context = await makeContext("javascript-no-action");
       await seedKey(context);
       await seedStamp(context);
 

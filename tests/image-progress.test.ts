@@ -13,6 +13,10 @@ import {
   saveImageJob,
 } from "../src/server/image-state";
 import { loadImageProgress } from "../src/server/image-progress";
+import {
+  markImageJobLiveForTests,
+  resetImageJobLivenessForTests,
+} from "../src/server/image-job-liveness";
 import { buildAttemptFilename, validateImageBytes } from "../src/server/image-validation";
 import { resetCredentialHolderForTests } from "../src/server/credentials";
 import { Storage } from "../src/server/storage";
@@ -40,7 +44,7 @@ async function publishValidImages(storage: Storage, count: number): Promise<void
     await storage.writeFile(["images", filename], bytes);
     manifest = publishAttempt(manifest, productId, id, {
       filename,
-      validation: validateImageBytes(bytes, { filename }),
+      validation: await validateImageBytes(bytes, { filename }),
       publishedAt: new Date(),
       finishedAt: new Date(),
     });
@@ -84,6 +88,7 @@ async function saveJob(
 
 afterEach(async () => {
   resetCredentialHolderForTests();
+  resetImageJobLivenessForTests();
   await Promise.all(
     tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })),
   );
@@ -194,9 +199,10 @@ describe("image progress snapshot", () => {
   it("reports stopping and stopped_by_user states with the persisted stop request", async () => {
     const storage = await makeStorage();
     await publishValidImages(storage, 23);
-    await saveJob(storage, "stopping", [
+    const jobId = await saveJob(storage, "stopping", [
       { productId: "P24", status: "queued" },
     ]);
+    markImageJobLiveForTests(storage, jobId);
     const stopping = await loadImageProgress(storage, {
       env: { DATA_DIR: storage.root },
     });
@@ -204,6 +210,7 @@ describe("image progress snapshot", () => {
       status: "stopping",
       stopRequested: true,
     });
+    expect(stopping.setup.status).toBe("stopping");
 
     await saveJob(storage, "stopped_by_user", [
       {

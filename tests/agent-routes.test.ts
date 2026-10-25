@@ -260,7 +260,7 @@ describe("agent run API routes", () => {
       expect(startedBody.ok).toBe(true);
       expect(startedBody.run).toMatchObject({
         kind: "task",
-        task: "Read the main heading.",
+        task: `Start at ${origin}.\nRead the main heading.`,
         limits: { maxSteps: 12, timeoutMs: 180_000, maxCostUsd: 1 },
       });
       expect(JSON.stringify(startedBody)).not.toContain(TEST_KEY);

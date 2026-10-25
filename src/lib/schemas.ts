@@ -20,6 +20,18 @@ export const modelIdSchema = z
     "Model IDs must look like author/slug (letters, digits, . _ : - and /).",
   );
 
+/**
+ * The Browser Use SDK resolves the first path segment as the inference
+ * provider and reads that provider's ambient credentials. Browser runs must
+ * stay on the app's OpenRouter account, so only `openrouter/<author>/<slug>`
+ * is accepted.
+ */
+export const browserModelIdSchema = modelIdSchema.refine(
+  (value) =>
+    value.startsWith("openrouter/") && value.split("/").length >= 3,
+  "Browser model IDs must start with openrouter/ and name a model, e.g. openrouter/openai/gpt-5.6-luna.",
+);
+
 export const imageAspectRatioSchema = z
   .string()
   .trim()
@@ -36,7 +48,7 @@ export const imageModelSettingsSchema = z.strictObject({
 });
 
 export const browserModelSettingsSchema = z.strictObject({
-  modelId: modelIdSchema,
+  modelId: browserModelIdSchema,
 });
 
 export const modelSettingsSchema = z.strictObject({

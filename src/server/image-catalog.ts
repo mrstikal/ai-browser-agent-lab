@@ -13,7 +13,12 @@ export const DEFAULT_IMAGE_CATALOG_MAX_BYTES = 1024 * 1024;
 export interface ImageModelCapabilities {
   readonly modelId: string;
   readonly providerSlug: string;
-  readonly providerTag: string | null;
+  /**
+   * Full routing tag (`provider[/variant][/region][/tier]`). OpenRouter's
+   * `provider.only` matches a base slug to every endpoint variant, so the
+   * quote must pin this exact tag to keep the approved capabilities and price.
+   */
+  readonly providerTag: string;
   readonly resolution: string;
   readonly aspectRatio: string;
   readonly format: "png" | "jpeg" | "webp";
@@ -44,6 +49,14 @@ export interface FetchImageCapabilitiesOptions {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function routingIdentifier(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (trimmed.length === 0 || trimmed.length > 128) return null;
+  if (/[\u0000-\u001f\u007f]/.test(trimmed)) return null;
+  return trimmed;
 }
 
 function descriptorAllowsString(descriptor: unknown, value: string): boolean {
@@ -77,7 +90,7 @@ function descriptorAllowsSingle(descriptor: unknown): boolean {
 
 interface EligibleEndpoint {
   readonly providerSlug: string;
-  readonly providerTag: string | null;
+  readonly providerTag: string;
   readonly unitPriceUsd: string;
   readonly unitMicro: bigint;
 }
@@ -236,27 +249,36 @@ export async function fetchImageModelCapabilities(
   if (eligible.length === 0) return { status: "unverified-capabilities" };
 
   const priced: EligibleEndpoint[] = [];
+  let hasUsablePrice = false;
   for (const endpoint of eligible) {
     const price = pricingForResolution(endpoint, selection.resolution);
     if (!price) continue;
+    hasUsablePrice = true;
+    const providerSlug = routingIdentifier(endpoint.provider_slug);
+    const providerTag = routingIdentifier(endpoint.provider_tag);
+    // A base slug alone can match several endpoint variants with different
+    // capabilities or prices. Without a full tag the endpoint cannot be pinned
+    // to the metadata that was quoted, so it is not eligible for a paid batch.
+    if (!providerSlug || !providerTag) continue;
     priced.push({
-      providerSlug:
-        typeof endpoint.provider_slug === "string"
-          ? endpoint.provider_slug
-          : "unknown",
-      providerTag:
-        typeof endpoint.provider_tag === "string" ? endpoint.provider_tag : null,
+      providerSlug,
+      providerTag,
       unitPriceUsd: price.unitPriceUsd,
       unitMicro: price.unitMicro,
     });
   }
-  if (priced.length === 0) return { status: "unknown-price" };
+  if (priced.length === 0) {
+    return hasUsablePrice
+      ? { status: "unverified-capabilities" }
+      : { status: "unknown-price" };
+  }
 
   priced.sort((left, right) => {
     if (left.unitMicro !== right.unitMicro) {
       return left.unitMicro < right.unitMicro ? -1 : 1;
     }
-    return left.providerSlug.localeCompare(right.providerSlug);
+    const slug = left.providerSlug.localeCompare(right.providerSlug);
+    return slug !== 0 ? slug : left.providerTag.localeCompare(right.providerTag);
   });
   const chosen = priced[0];
   if (!chosen) return { status: "unknown-price" };

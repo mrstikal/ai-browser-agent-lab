@@ -61,7 +61,7 @@ async function addPublishedImage(
   const filename = buildAttemptFilename(productId, id, "png");
   const bytes = pngBytes(32, 32);
   await storage.writeFile(["images", filename], bytes);
-  const validation = validateImageBytes(bytes, { filename });
+  const validation = await validateImageBytes(bytes, { filename });
   next = publishAttempt(next, productId, id, {
     filename,
     validation,

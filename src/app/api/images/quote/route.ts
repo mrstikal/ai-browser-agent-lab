@@ -12,6 +12,7 @@ export const runtime = "nodejs";
 
 const quoteSchema = z.strictObject({
   selectedIds: z.array(z.string().min(1).max(16)).max(24).optional(),
+  intent: z.enum(["resume", "regenerate"]).optional(),
 });
 
 function failure(status: number, code: string, message: string): Response {
@@ -46,6 +47,7 @@ export async function POST(request: Request): Promise<Response> {
       storage: createStorage(),
       apiKey,
       selectedIds: guarded.data.selectedIds,
+      intent: guarded.data.intent,
     });
     return Response.json(
       {

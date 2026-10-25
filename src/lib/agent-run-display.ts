@@ -190,8 +190,8 @@ export function shouldShowOverallTaskResult(
 
 /**
  * Overall outcome for a predefined task. A matching business answer is not a
- * full pass unless the execution completed and a browser tool event was
- * observed; custom tasks remain not evaluated.
+ * full pass unless the execution completed and a recorded browser page action
+ * was observed; custom tasks remain not evaluated.
  */
 export function describeOverallTaskResult(
   run: Pick<
@@ -253,7 +253,7 @@ export function describeOverallTaskResult(
       label: "Business result passed; UI unverified",
       tone: "warning",
       detail:
-        "The answer matched, but no successful browser JavaScript tool event was observed. This is not a full pass.",
+        "The answer matched, but no recorded browser page action was observed. This is not a full pass.",
       fullPass: false,
     };
   }
@@ -261,7 +261,7 @@ export function describeOverallTaskResult(
     label: "Full task pass",
     tone: "success",
     detail:
-      "The execution completed, the business result matched, and a successful browser JavaScript tool event was observed.",
+      "The execution completed, the business result matched, and a recorded browser page action was observed.",
     fullPass: true,
   };
 }

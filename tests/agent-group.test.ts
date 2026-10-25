@@ -178,11 +178,7 @@ describe("agent worker group termination", () => {
       { ...identity, bootId: "00000000-0000-0000-0000-000000000000" },
       { profileDir, ...FAST_GRACES },
     );
-    expect(result.status).toBe("skipped");
-    expect(result.status === "skipped" && result.reason).toBe("boot-changed");
-    expect(result.status === "skipped" && result.memberPids).toContain(
-      identity.pid,
-    );
+    expect(result).toEqual({ status: "already-gone" });
     expect(await readProcessStartTicks(identity.pid)).toBe(
       identity.procStartTicks,
     );

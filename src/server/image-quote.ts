@@ -22,6 +22,8 @@ import { formatUsdMicro, parseUsdToMicro } from "./usd";
 export { QUOTE_ATTEMPTS_PER_IMAGE };
 export const QUOTE_PER_REQUEST_FLOOR_USD = "1.00";
 
+export type ImageQuoteIntent = "missing" | "resume" | "regenerate";
+
 export type ImageQuoteCode =
   | "no-targets"
   | "invalid-selection"
@@ -63,7 +65,7 @@ export interface ImageQuote {
   readonly attemptsPerImage: number;
   readonly selection: ImageModelSelection;
   readonly providerSlug: string;
-  readonly providerTag: string | null;
+  readonly providerTag: string;
   readonly providerOnly: readonly string[];
   readonly unitPriceUsd: string;
   readonly baseUsd: string;
@@ -77,9 +79,10 @@ export interface ImageQuote {
 function quoteFingerprint(input: {
   readonly selection: ImageModelSelection;
   readonly providerSlug: string;
-  readonly providerTag: string | null;
+  readonly providerTag: string;
   readonly unitPriceUsd: string;
   readonly targets: readonly ProductId[];
+  readonly intent: ImageQuoteIntent;
 }): string {
   return createHash("sha256")
     .update(JSON.stringify(input))
@@ -94,6 +97,7 @@ function quoteFingerprint(input: {
 export function computeImageQuote(
   targets: readonly ProductId[],
   capabilities: ImageModelCapabilities,
+  intent: ImageQuoteIntent = "regenerate",
 ): ImageQuote {
   if (targets.length === 0) {
     throw new ImageQuoteError("no-targets", "Choose at least one image to generate.");
@@ -134,7 +138,7 @@ export function computeImageQuote(
     selection,
     providerSlug: capabilities.providerSlug,
     providerTag: capabilities.providerTag,
-    providerOnly: [capabilities.providerSlug],
+    providerOnly: [capabilities.providerTag],
     unitPriceUsd: formatUsdMicro(unitMicro),
     baseUsd: formatUsdMicro(baseMicro),
     worstCaseUsd: formatUsdMicro(worstCaseMicro),
@@ -147,6 +151,7 @@ export function computeImageQuote(
       providerTag: capabilities.providerTag,
       unitPriceUsd: formatUsdMicro(unitMicro),
       targets,
+      intent,
     }),
   };
 }
@@ -186,6 +191,12 @@ export interface PrepareImageQuoteOptions {
   readonly apiKey: string | undefined;
   readonly selection?: ImageModelSelection | undefined;
   readonly selectedIds?: readonly string[] | undefined;
+  /**
+   * `resume` re-filters selected IDs against the current missing set, so a
+   * confirmation from another tab cannot pay to regenerate an image that has
+   * since become valid. `regenerate` is an explicit paid overwrite.
+   */
+  readonly intent?: ImageQuoteIntent | undefined;
   readonly env?: StorageEnv | undefined;
   readonly fetchImpl?: typeof fetch | undefined;
   readonly timeoutMs?: number | undefined;
@@ -225,10 +236,17 @@ export async function prepareImageQuote(
     selection = settings.image;
   }
 
+  const intent: ImageQuoteIntent =
+    options.intent ??
+    (options.selectedIds !== undefined ? "regenerate" : "missing");
   let targets: ProductId[];
-  if (options.selectedIds !== undefined) {
-    targets = normalizeSelectedIds(options.selectedIds);
-  } else {
+  if (intent === "missing") {
+    if (options.selectedIds !== undefined) {
+      throw new ImageQuoteError(
+        "invalid-selection",
+        "The missing-image quote does not accept explicit image IDs.",
+      );
+    }
     try {
       targets = await missingTargets(options.storage);
     } catch (error) {
@@ -237,6 +255,34 @@ export async function prepareImageQuote(
         "Saved image state is unreadable; inspect the image manifest before quoting.",
         { cause: error },
       );
+    }
+  } else {
+    if (options.selectedIds === undefined) {
+      throw new ImageQuoteError(
+        "invalid-selection",
+        `${intent === "resume" ? "A resume" : "A regeneration"} quote needs explicit image IDs.`,
+      );
+    }
+    targets = normalizeSelectedIds(options.selectedIds);
+    if (intent === "resume") {
+      let missing: ProductId[];
+      try {
+        missing = await missingTargets(options.storage);
+      } catch (error) {
+        throw new ImageQuoteError(
+          "invalid-image-state",
+          "Saved image state is unreadable; inspect the image manifest before quoting.",
+          { cause: error },
+        );
+      }
+      const stillMissing = new Set<string>(missing);
+      targets = targets.filter((productId) => stillMissing.has(productId));
+      if (targets.length === 0) {
+        throw new ImageQuoteError(
+          "no-targets",
+          "All selected images are already valid; no paid resume is needed.",
+        );
+      }
     }
   }
   if (targets.length === 0) {
@@ -270,5 +316,5 @@ export async function prepareImageQuote(
     );
   }
 
-  return computeImageQuote(targets, capabilities.capabilities);
+  return computeImageQuote(targets, capabilities.capabilities, intent);
 }

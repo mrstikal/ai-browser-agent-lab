@@ -168,7 +168,7 @@ async function publishValidImage(
   await storage.writeFile(["images", filename], bytes);
   manifest = publishAttempt(manifest, productId as never, id, {
     filename,
-    validation: validateImageBytes(bytes, { filename }),
+    validation: await validateImageBytes(bytes, { filename }),
     publishedAt: new Date(),
     finishedAt: new Date(),
   });
@@ -508,7 +508,9 @@ describe("sequential image batch", () => {
           json(response, 200, {
             data: [
               {
-                b64_json: Buffer.from("not an image").toString("base64"),
+                b64_json: pngBytes(32, 32)
+                  .subarray(0, 20)
+                  .toString("base64"),
                 media_type: "image/png",
               },
             ],

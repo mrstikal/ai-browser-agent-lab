@@ -12,6 +12,11 @@ import {
 } from "../src/server/image-state";
 import { buildAttemptFilename, validateImageBytes } from "../src/server/image-validation";
 import {
+  resetAdmittedImageJobsForTests,
+  startImageJob,
+} from "../src/server/image-job";
+import { resetPaidOperationsForTests } from "../src/server/paid-operation";
+import {
   computeImageQuote,
   isImageQuoteCurrent,
   prepareImageQuote,
@@ -128,7 +133,8 @@ function endpoint(providerSlug: string, options: EndpointOptions = {}): unknown 
   return {
     provider_name: providerSlug,
     provider_slug: providerSlug,
-    provider_tag: options.providerTag ?? providerSlug,
+    provider_tag:
+      options.providerTag === undefined ? providerSlug : options.providerTag,
     allowed_passthrough_parameters: [],
     supports_streaming: false,
     supported_parameters: parameters,
@@ -169,7 +175,7 @@ async function publishOneValidImage(storage: Storage): Promise<void> {
   await storage.writeFile(["images", filename], bytes);
   manifest = publishAttempt(manifest, "P01", id, {
     filename,
-    validation: validateImageBytes(bytes, { filename }),
+    validation: await validateImageBytes(bytes, { filename }),
     publishedAt: new Date(),
     finishedAt: new Date(),
   });
@@ -182,7 +188,7 @@ function capability(
   return {
     modelId: DEFAULT_IMAGE_MODEL_ID,
     providerSlug: "black-forest-labs",
-    providerTag: null,
+    providerTag: "black-forest-labs",
     resolution: "768",
     aspectRatio: "1:1",
     format: "png",
@@ -197,6 +203,8 @@ const ALL_PRODUCT_IDS = Array.from(
 ) as ProductId[];
 
 afterEach(async () => {
+  resetPaidOperationsForTests();
+  await resetAdmittedImageJobsForTests();
   await Promise.all(
     servers.splice(0).map(
       (server) =>
@@ -617,8 +625,62 @@ describe("prepareImageQuote", () => {
     );
     const second = await prepareImageQuote({ storage, apiKey: "sk", env: tagB.env });
     expect(first.providerTag).toBe("tag-a");
+    expect(first.providerOnly).toEqual(["tag-a"]);
     expect(second.providerTag).toBe("tag-b");
+    expect(second.providerOnly).toEqual(["tag-b"]);
     expect(isImageQuoteCurrent(first, second)).toBe(false);
+  });
+
+  it("drops newly valid targets from a resume and rejects the stale quote", async () => {
+    const storage = await makeStorage();
+    const catalog = await startCatalog(
+      withCatalog(
+        modelsList([DEFAULT_IMAGE_MODEL_ID]),
+        endpointsResponse([endpoint("cheap")]),
+      ),
+    );
+    const before = await prepareImageQuote({
+      storage,
+      apiKey: "sk",
+      env: catalog.env,
+      selectedIds: ["P01", "P02"],
+      intent: "resume",
+    });
+    expect(before.targets).toEqual(["P01", "P02"]);
+
+    await publishOneValidImage(storage);
+    const rechecked = await prepareImageQuote({
+      storage,
+      apiKey: "sk",
+      env: catalog.env,
+      selectedIds: ["P01", "P02"],
+      intent: "resume",
+    });
+    expect(rechecked.targets).toEqual(["P02"]);
+    expect(rechecked.fingerprint).not.toBe(before.fingerprint);
+
+    const started = await startImageJob({
+      storage,
+      apiKey: "sk",
+      env: catalog.env,
+      fingerprint: before.fingerprint,
+      selectedIds: ["P01", "P02"],
+      intent: "resume",
+    });
+    expect(started.status).toBe("quote-changed");
+  });
+
+  it("rejects an endpoint without a usable routing tag", async () => {
+    const storage = await makeStorage();
+    const catalog = await startCatalog(
+      withCatalog(
+        modelsList([DEFAULT_IMAGE_MODEL_ID]),
+        endpointsResponse([endpoint("cheap", { providerTag: null })]),
+      ),
+    );
+    await expect(
+      prepareImageQuote({ storage, apiKey: "sk", env: catalog.env }),
+    ).rejects.toMatchObject({ code: "unverified-capabilities" });
   });
 
   it("wraps settings and manifest corruption into quote codes", async () => {

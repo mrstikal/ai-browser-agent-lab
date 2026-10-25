@@ -60,6 +60,30 @@ export function parseModelSettings(value: unknown): ModelSettings {
   return result.data;
 }
 
+/**
+ * Older settings allowed arbitrary browser provider prefixes. Those IDs made
+ * the SDK select an ambient provider; migrate them onto the app's OpenRouter
+ * account instead of making the whole settings file unreadable.
+ */
+function migrateLegacyBrowserModel(value: unknown): unknown {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return value;
+  }
+  const record = value as Record<string, unknown>;
+  const browser = record.browser;
+  if (typeof browser !== "object" || browser === null || Array.isArray(browser)) {
+    return value;
+  }
+  const modelId = (browser as Record<string, unknown>).modelId;
+  if (typeof modelId !== "string") return value;
+  const trimmed = modelId.trim();
+  if (trimmed.length === 0 || trimmed.startsWith("openrouter/")) return value;
+  return {
+    ...record,
+    browser: { ...browser, modelId: `openrouter/${trimmed}` },
+  };
+}
+
 export async function loadModelSettings(
   storage: Storage,
 ): Promise<ModelSettings> {
@@ -76,7 +100,7 @@ export async function loadModelSettings(
     throw error;
   }
   if (raw === undefined) return createDefaultModelSettings();
-  return parseModelSettings(raw);
+  return parseModelSettings(migrateLegacyBrowserModel(raw));
 }
 
 export async function saveModelSettings(

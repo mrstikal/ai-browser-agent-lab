@@ -395,8 +395,9 @@ export function TaskPanel({
                 <dd>
                   {displayRun.uiEvidence === "observed" ? "Observed" : "Unverified"}
                   <span className="mt-1 block text-xs text-slate-500">
-                    Observed means a successful browser JavaScript tool event
-                    was persisted. It is trace evidence, not cryptographic proof.
+                    Observed means the SDK recorded a browser page action such
+                    as a navigation, click, or type. It is trace evidence, not
+                    cryptographic proof.
                   </span>
                 </dd>
               </div>

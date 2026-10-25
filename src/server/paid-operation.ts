@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 export class PaidOperationError extends Error {
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
@@ -81,4 +83,22 @@ export function resetPaidOperationsForTests(): void {
 export function assertNoActivePaidOperation(): void {
   const active = activePaidOperation();
   if (active) throw new PaidOperationActiveError(active.ownerId);
+}
+
+/**
+ * Runs a short mutation under the same exclusion as paid admission. The marker
+ * is installed synchronously, so a paid start either observes it and refuses
+ * or completes admission before the mutation can begin.
+ */
+export async function withExclusivePaidOperation<T>(
+  kind: string,
+  task: () => Promise<T>,
+): Promise<T> {
+  const ownerId = `${kind}:${randomUUID()}`;
+  beginPaidOperation(ownerId, kind);
+  try {
+    return await task();
+  } finally {
+    endPaidOperation(ownerId);
+  }
 }

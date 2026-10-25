@@ -83,3 +83,22 @@ export function resolveAppConfig(env: AppConfigEnv = process.env): AppConfig {
   const configured = env.APP_ORIGIN;
   return parseLoopbackOrigin(configured === undefined ? DEFAULT_APP_ORIGIN : configured);
 }
+
+/**
+ * DNS-rebinding guard for sensitive reads. The browser sends the attacker's
+ * hostname in `Host` even after the name resolves to loopback, so comparing it
+ * to the configured origin blocks same-origin reads of local data.
+ */
+export function isTrustedHostHeader(
+  host: string | null | undefined,
+  env: AppConfigEnv = process.env,
+): boolean {
+  if (typeof host !== "string") return false;
+  const normalized = host.trim().toLowerCase();
+  if (!normalized) return false;
+  try {
+    return normalized === new URL(resolveAppConfig(env).origin).host.toLowerCase();
+  } catch {
+    return false;
+  }
+}

@@ -338,6 +338,42 @@ describe("credential lifecycle", () => {
     expect(getOpenRouterKey()).toBe("sk-or-v1-after-paid");
   });
 
+  it("holds the paid exclusion across async compatibility invalidation", async () => {
+    const dataDir = await makeDataDir();
+    const env = envFor(dataDir);
+    resetCredentialHolderForTests();
+    const base = new Storage(dataDir);
+    let releaseDelete: (() => void) | undefined;
+    const deleteGate = new Promise<void>((resolve) => {
+      releaseDelete = resolve;
+    });
+    const slowStorage = new Proxy(base, {
+      get(target, property) {
+        if (property === "deleteFile") {
+          return async (segments: Parameters<Storage["deleteFile"]>[0]) => {
+            await deleteGate;
+            return target.deleteFile(segments);
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as Storage;
+
+    const pending = setOpenRouterKey("sk-or-v1-race", {
+      remember: false,
+      env,
+      storage: slowStorage,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(() => beginPaidOperation("race-paid", "image")).toThrow(
+      PaidOperationActiveError,
+    );
+    releaseDelete?.();
+    await pending;
+    expect(getOpenRouterKey()).toBe("sk-or-v1-race");
+  });
+
   it("invalidates model verification before changing the key and aborts on failure", async () => {
     const dataDir = await makeDataDir();
     const env = envFor(dataDir);

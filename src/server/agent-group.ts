@@ -251,6 +251,105 @@ export async function listOwnedProcesses(
     }));
 }
 
+export interface TerminateOwnedProcessesOptions extends ProcOptions {
+  readonly sigtermGraceMs?: number | undefined;
+  readonly sigkillGraceMs?: number | undefined;
+  readonly sleepImpl?: ((ms: number) => Promise<void>) | undefined;
+  readonly excludePids?: readonly number[] | undefined;
+  readonly onSignal?: ((signal: AgentGroupSignal, pids: readonly number[]) => void) | undefined;
+}
+
+export type OwnedProcessTermination =
+  | {
+      readonly status: "terminated";
+      readonly signals: readonly AgentGroupSignal[];
+      readonly remainingPids: readonly number[];
+    }
+  | { readonly status: "already-gone" }
+  | {
+      readonly status: "escaped";
+      readonly signals: readonly AgentGroupSignal[];
+      readonly remainingPids: readonly number[];
+    };
+
+/**
+ * Worker-side orphan cleanup. Unlike group termination this never signals the
+ * caller or its ancestors: only profile-marked Chromium processes and their
+ * descendants are targeted, and every PID is re-verified by start ticks.
+ */
+export async function terminateOwnedAgentProcesses(
+  profileDir: string,
+  options: TerminateOwnedProcessesOptions = {},
+): Promise<OwnedProcessTermination> {
+  const sleep =
+    options.sleepImpl ??
+    ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const sigtermGraceMs = options.sigtermGraceMs ?? AGENT_SIGTERM_GRACE_MS;
+  const sigkillGraceMs = options.sigkillGraceMs ?? AGENT_SIGKILL_GRACE_MS;
+  const procOptions: ProcOptions = { procRoot: options.procRoot };
+  const excluded = new Set<number>([process.pid, ...(options.excludePids ?? [])]);
+  const signals: AgentGroupSignal[] = [];
+
+  const scan = async (): Promise<AgentOwnedProcess[]> => {
+    const owned = await listOwnedProcesses(profileDir, procOptions);
+    return owned.filter((entry) => !excluded.has(entry.pid));
+  };
+
+  const signalVerified = async (
+    signal: AgentGroupSignal,
+  ): Promise<number> => {
+    const targets = await scan();
+    const verified: AgentOwnedProcess[] = [];
+    for (const target of targets) {
+      let current: ProcStatFields | undefined;
+      try {
+        current = await readProcStatFields(target.pid, procOptions);
+      } catch {
+        continue;
+      }
+      if (
+        current === undefined ||
+        current.state === "Z" ||
+        current.procStartTicks !== target.procStartTicks
+      ) {
+        continue;
+      }
+      verified.push(target);
+    }
+    if (verified.length === 0) return 0;
+    options.onSignal?.(
+      signal,
+      verified.map((entry) => entry.pid),
+    );
+    signalPids(
+      verified.map((entry) => entry.pid),
+      signal,
+    );
+    return verified.length;
+  };
+
+  if (profileDir.length === 0) return { status: "already-gone" };
+  if ((await scan()).length === 0) return { status: "already-gone" };
+
+  if ((await signalVerified("SIGTERM")) > 0) signals.push("SIGTERM");
+  await sleep(sigtermGraceMs);
+  if ((await scan()).length === 0) {
+    return { status: "terminated", signals, remainingPids: [] };
+  }
+
+  if ((await signalVerified("SIGKILL")) > 0) signals.push("SIGKILL");
+  await sleep(sigkillGraceMs);
+  const remaining = await scan();
+  if (remaining.length === 0) {
+    return { status: "terminated", signals, remainingPids: [] };
+  }
+  return {
+    status: "escaped",
+    signals,
+    remainingPids: remaining.map((entry) => entry.pid),
+  };
+}
+
 function signalPids(pids: readonly number[], signal: AgentGroupSignal): void {
   for (const pid of pids) {
     try {
@@ -305,13 +404,10 @@ export async function terminateAgentWorkerGroup(
     return { status: "skipped", reason: "unverifiable", memberPids: [] };
   }
   if (worker.bootId !== bootId) {
-    return {
-      status: "skipped",
-      reason: "boot-changed",
-      memberPids: (await listAgentGroupMembers(worker.groupId, procOptions)).map(
-        (member) => member.pid,
-      ),
-    };
+    // Processes from a previous boot cannot survive a reboot. There is no
+    // current-boot PID that could still belong to this run, so the ownership
+    // is provably gone without signaling any process.
+    return { status: "already-gone" };
   }
 
   const leader = await readProcStatFields(worker.pid, procOptions);

@@ -218,10 +218,37 @@ export async function recoverInterruptedAgentState(
   const now = options.now ?? (() => new Date());
   const active = await listActiveAgentRuns(storage);
   const runs: AgentRecoveryRunReport[] = [];
+  // A result is persisted before the worker closes its browser. If the server
+  // dies in that window, the run is already terminal but still owns the paid
+  // lock and a live process group. The lock is the durable pointer to that
+  // cleanup obligation, independent of the run's execution status.
+  const cleanupOnly: AgentRunRecord[] = [];
+  try {
+    const metadata = await readLockMetadata(storage.path(PAID_JOB_LOCK_SEGMENTS));
+    if (
+      metadata?.kind === AGENT_RUN_LOCK_KIND &&
+      getActiveAgentRunId(storage.root) !== metadata.ownerId &&
+      !active.runs.some((run) => run.runId === metadata.ownerId)
+    ) {
+      const run = await loadAgentRun(storage, metadata.ownerId);
+      // Only a completed run is in the post-result cleanup window. Interrupted
+      // and failed terminal runs are owned by the unresolved-report retry path.
+      if (run && run.status === "completed") {
+        cleanupOnly.push(run);
+      }
+    }
+  } catch (error) {
+    console.error(
+      `[agent-recovery] The paid lock could not be inspected for post-result cleanup: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 
   const inspect = async (
     run: AgentRunRecord,
   ): Promise<AgentGroupTermination> => {
+    // `start` is only sent after the worker identity is persisted, so a null
+    // identity proves the worker never launched a browser.
+    if (!run.worker) return { status: "already-gone" };
     const profileDir = storage.path(
       options.profileRoot ?? ["browser-profiles", run.runId],
     );
@@ -317,6 +344,20 @@ export async function recoverInterruptedAgentState(
       updated.evaluation = await evaluatePresetTaskRun(updated, storage);
     }
     await saveAgentRun(storage, updated);
+    runs.push(toReport(run, termination, lock, message));
+  }
+
+  for (const run of cleanupOnly) {
+    if (processed.has(run.runId)) continue;
+    processed.add(run.runId);
+    const termination = run.worker
+      ? await inspect(run)
+      : ({ status: "already-gone" } as AgentGroupTermination);
+    const lock = await settleGroup(run, termination);
+    const message =
+      termination.status === "terminated" || termination.status === "already-gone"
+        ? `The app restarted after this run's result was persisted; its worker process group is gone and post-result cleanup completed (lock ${lock}).`
+        : terminationMessage(termination, run.runId);
     runs.push(toReport(run, termination, lock, message));
   }
 

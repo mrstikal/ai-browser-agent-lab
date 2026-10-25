@@ -60,6 +60,21 @@ describe("model settings", () => {
     }
   });
 
+  it("migrates a legacy non-OpenRouter browser model on load", async () => {
+    const storage = await makeStorage();
+    const base = createDefaultModelSettings();
+    await storage.writeJson(["settings.json"], {
+      ...base,
+      browser: { modelId: "openai/gpt-5.6" },
+    });
+    const loaded = await loadModelSettings(storage);
+    expect(loaded.browser.modelId).toBe("openrouter/openai/gpt-5.6");
+    const updated = updateBrowserSettings(loaded, {
+      modelId: "openrouter/openai/gpt-5.6-luna",
+    });
+    expect(updated.browser.modelId).toBe("openrouter/openai/gpt-5.6-luna");
+  });
+
   it("updates image and browser choices without touching each other", async () => {
     const base = createDefaultModelSettings();
     const withImage = updateImageSettings(base, {
@@ -87,6 +102,8 @@ describe("model settings", () => {
       "a//b",
       `a/${"x".repeat(300)}`,
       "a/\u0000b",
+      "openai/gpt-5.6",
+      "anthropic/claude-sonnet",
       "",
     ]) {
       expect(() =>

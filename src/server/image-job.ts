@@ -4,6 +4,7 @@ import {
   prepareImageQuote,
   type ImageQuote,
   type ImageQuoteCode,
+  type ImageQuoteIntent,
 } from "./image-quote";
 import {
   createImageJobSnapshot,
@@ -45,10 +46,14 @@ export type StartImageJobResult =
 
 export interface StartImageJobOptions {
   readonly storage: Storage;
-  readonly apiKey: string;
+  /** Test/in-process callers may pass a key; routes should pass a loader. */
+  readonly apiKey?: string | undefined;
+  /** Resolved after admission so a concurrent key change cannot slip in. */
+  readonly loadApiKey?: (() => Promise<string | undefined>) | undefined;
   readonly fingerprint: string;
   readonly selection?: ImageQuote["selection"] | undefined;
   readonly selectedIds?: readonly string[] | undefined;
+  readonly intent?: ImageQuoteIntent | undefined;
   readonly env?: StorageEnv | undefined;
   readonly fetchImpl?: typeof fetch | undefined;
   readonly now?: Date | undefined;
@@ -256,13 +261,34 @@ async function startImageJobLocked(
       throw error;
     }
 
+    let apiKey = options.apiKey;
+    if (apiKey === undefined && options.loadApiKey) {
+      try {
+        apiKey = await options.loadApiKey();
+      } catch {
+        if (!(await releaseAdmission(jobId, lock))) {
+          return {
+            status: "lock-error",
+            message:
+              "The paid-job lock could not be released safely; inspect data/locks/paid-job.lock.",
+          };
+        }
+        return {
+          status: "quote-rejected",
+          code: "key-required",
+          message: "The stored OpenRouter key is unreadable.",
+        };
+      }
+    }
+
     let quote: ImageQuote;
     try {
       quote = await prepareImageQuote({
         storage,
-        apiKey: options.apiKey,
+        apiKey,
         selection: options.selection,
         selectedIds: options.selectedIds,
+        intent: options.intent,
         env: options.env,
         fetchImpl: options.fetchImpl,
       });

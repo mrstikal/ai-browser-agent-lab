@@ -10,6 +10,7 @@ import {
   type SetupStatus,
 } from "./image-state";
 import { getKeyStatus } from "./credentials";
+import { isImageJobLive } from "./image-job-liveness";
 import { formatUsdMicro } from "./usd";
 import { loadDeliverableImages, type DeliverableImage } from "./image-delivery";
 import { Storage, type StorageEnv } from "./storage";
@@ -177,7 +178,10 @@ export async function loadImageProgress(
 
   let setup;
   try {
-    setup = await inspectSetupState(storage, { keyAvailable });
+    setup = await inspectSetupState(storage, {
+      keyAvailable,
+      jobIsLive: isImageJobLive(storage, job),
+    });
   } catch {
     return emptySnapshot(generatedAt, keyAvailable, "Image setup state is unreadable.");
   }

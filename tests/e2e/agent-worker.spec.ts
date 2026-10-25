@@ -297,7 +297,8 @@ test("history keeps persisted runs, honest usage, and historical traces", async 
   const latestRun = statusBody.runs.find(
     (run) =>
       run.kind === "task" &&
-      run.task === "Read the main heading after history check.",
+      run.task ===
+        `Start at ${baseURL}.\nRead the main heading after history check.`,
   );
   if (!xssRun || !latestRun) {
     throw new Error("The history test runs were not persisted.");
@@ -312,7 +313,7 @@ test("history keeps persisted runs, honest usage, and historical traces", async 
     "Not evaluated",
   );
   await expect(xssItem.getByTestId("agent-history-ui-evidence")).toHaveText(
-    "Unverified",
+    "Observed",
   );
   await expect(xssItem.getByTestId("agent-history-vision")).toHaveText(
     "Unverified",
@@ -687,7 +688,9 @@ test("dashboard refuses a duplicate run and renders cancellation", async ({
     runs: Array<{ runId: string; kind: string; task: string }>;
   };
   const cancelledRun = statusBody.runs.find(
-    (run) => run.kind === "task" && run.task === "Hold the run [[cancel]]",
+    (run) =>
+      run.kind === "task" &&
+      run.task === `Start at ${baseURL}.\nHold the run [[cancel]]`,
   );
   if (!cancelledRun) {
     throw new Error("The cancelled run was not persisted.");

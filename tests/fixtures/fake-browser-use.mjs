@@ -46,12 +46,16 @@ const agent = {
       result: {
         content: [
           { type: "text", text: "Read the heading." },
-          ...(mode === "vision"
+          ...(mode === "vision" || mode === "vision-no-followup"
             ? [{ type: "image", data: "", mimeType: "image/png" }]
             : []),
         ],
       },
     });
+    if (mode === "vision") {
+      // The image only becomes model input on a subsequent turn.
+      options.onEvent?.({ type: "turn_start", turn: 2 });
+    }
     return {
       status: "completed",
       output: { heading: "Shop" },

@@ -29,7 +29,7 @@ import { DEFAULT_IMAGE_MODEL_ID } from "../src/server/model-settings";
 import { resetPaidOperationsForTests } from "../src/server/paid-operation";
 import { Storage } from "../src/server/storage";
 import type { ImageModelSelection } from "../src/lib/schemas";
-import { attemptId, pngBytes } from "./helpers/image-fixtures";
+import { attemptId, pngBytes, svgBytes } from "./helpers/image-fixtures";
 
 const tempDirs: string[] = [];
 const servers: Server[] = [];
@@ -130,7 +130,7 @@ async function seedValidImages(storage: Storage, count: number): Promise<void> {
     await storage.writeFile(["images", filename], bytes);
     manifest = publishAttempt(manifest, productId, id, {
       filename,
-      validation: validateImageBytes(bytes, { filename }),
+      validation: await validateImageBytes(bytes, { filename }),
       publishedAt: new Date(),
       finishedAt: new Date(),
     });
@@ -450,6 +450,34 @@ describe("classified image retries", () => {
     const mismatchJobState = await loadImageJob(storage2);
     expect(mismatchJobState?.status).toBe("failed");
     expect(mismatchJobState?.error).toMatch(/format-mismatch/);
+  }, 30_000);
+
+  it("stops the batch on an unsupported SVG response", async () => {
+    const storage = await makeStorage();
+    await seedValidImages(storage, 23);
+    const svg = await startMock((response) => {
+      json(response, 200, {
+        data: [
+          {
+            b64_json: svgBytes.toString("base64"),
+            media_type: "image/svg+xml",
+          },
+        ],
+        usage: { cost: 0.008 },
+      });
+    });
+    const jobId = await admitSingleTarget(storage, svg);
+    await startImageBatch({
+      storage,
+      jobId,
+      apiKey: "sk-or-v1-retry-key",
+      env: svg,
+    });
+    await awaitImageBatch(storage);
+    expect(imagePostCount()).toBe(1);
+    const job = await loadImageJob(storage);
+    expect(job?.status).toBe("failed");
+    expect(job?.error).toMatch(/unsupported-format/);
   }, 30_000);
 
   it("retries timeouts, honours Retry-After on 5xx, and parses HTTP dates", async () => {

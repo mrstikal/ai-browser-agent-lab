@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { modelIdSchema } from "./schemas";
+import { browserModelIdSchema } from "./schemas";
 
 /**
  * Validated IPC contract between the agent supervisor and the one-run worker
@@ -65,7 +65,7 @@ export type AgentRunLimits = z.infer<typeof agentRunLimitsSchema>;
 export const agentStartMessageSchema = z.strictObject({
   type: z.literal("start"),
   runId: z.uuid(),
-  model: modelIdSchema,
+  model: browserModelIdSchema,
   task: z.string().trim().min(1).max(AGENT_WORKER_MAX_TASK_CHARS),
   startUrl: z.string().trim().min(1).max(300),
   limits: agentRunLimitsSchema,
@@ -140,27 +140,6 @@ export type AgentWorkerEventMessage = z.infer<
   typeof agentWorkerEventMessageSchema
 >;
 
-/**
- * The SDK's browser JavaScript tool. Only a successful end of this tool counts
- * as observed UI activity; delivery tools such as `finish` are not UI use.
- *
- * The SDK exposes tool events, not individual page-action events. A successful
- * `javascript` cell is the strongest browser-trace signal available here: it is
- * useful evidence that a browser tool ran, not cryptographic proof that the
- * cell touched a page primitive or the shop UI.
- */
-export const AGENT_BROWSER_TOOL_NAME = "javascript" as const;
-
-export function isObservedBrowserToolEvent(
-  event: AgentWorkerEventMessage,
-): boolean {
-  return (
-    event.kind === "tool_end" &&
-    event.isError === false &&
-    event.toolName === AGENT_BROWSER_TOOL_NAME
-  );
-}
-
 export const agentWorkerUsageSchema = z.strictObject({
   inputTokens: z.number().int().nonnegative().nullable(),
   outputTokens: z.number().int().nonnegative().nullable(),
@@ -179,6 +158,9 @@ export const agentWorkerResultMessageSchema = z.strictObject({
   durationMs: z.number().int().nonnegative().nullable(),
   usage: agentWorkerUsageSchema,
   imageInputObserved: z.boolean(),
+  pageActionObserved: z.boolean(),
+  navigationObserved: z.boolean(),
+  finalUrl: z.string().max(300).nullable(),
 });
 export type AgentWorkerResultMessage = z.infer<
   typeof agentWorkerResultMessageSchema

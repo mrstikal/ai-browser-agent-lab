@@ -60,16 +60,14 @@ export function ResumePanel({
     try {
       const response = await guardedJsonFetch("/api/images/quote", {
         method: "POST",
-        body: { selectedIds: targets },
+        body: { selectedIds: targets, intent: "resume" },
       });
       if (!response.ok) {
         setError(await readErrorMessage(response));
         return;
       }
-      const payload = (await response.json()) as {
-        quote: Omit<ResumeQuote, "targets">;
-      };
-      setReview({ ...payload.quote, targets });
+      const payload = (await response.json()) as { quote: ResumeQuote };
+      setReview(payload.quote);
     } catch {
       setError("The resume quote could not be prepared.");
     } finally {
@@ -89,6 +87,7 @@ export function ResumePanel({
           confirm: true,
           fingerprint: review.fingerprint,
           selectedIds: review.targets,
+          intent: "resume",
         },
       });
       if (!response.ok) {

@@ -71,7 +71,7 @@ async function seedValidImages(storage: Storage, count: number): Promise<void> {
     await storage.writeFile(["images", filename], bytes);
     manifest = publishAttempt(manifest, productId, id, {
       filename,
-      validation: validateImageBytes(bytes, { filename }),
+      validation: await validateImageBytes(bytes, { filename }),
       publishedAt: new Date(),
       finishedAt: new Date(),
     });

@@ -292,7 +292,7 @@ describe("one-image adapter", () => {
             200,
             imageResponse(svgBytes, { mediaType: "image/svg+xml" }),
           ),
-        code: "image-invalid",
+        code: "unsupported-format",
       },
       {
         name: "too-large dimensions",
@@ -338,6 +338,53 @@ describe("one-image adapter", () => {
         testCase.name,
       ).toBeUndefined();
     }
+  });
+
+  it("keeps reported cost when local validation rejects a billed response", async () => {
+    const storage = await makeStorage();
+    const id = attemptId(21);
+    const mock = await startMock((_request, response) => {
+      json(
+        response,
+        200,
+        imageResponse(svgBytes, { mediaType: "image/svg+xml", cost: 0.008 }),
+      );
+    });
+
+    const result = await run(storage, mock.env, { attemptId: id });
+    expect(result).toMatchObject({
+      status: "failed",
+      code: "unsupported-format",
+      cost: { kind: "reported", usd: 0.008 },
+    });
+    const manifest = await loadImageManifest(storage);
+    expect(manifest.products.P01?.attempts[0]).toMatchObject({
+      status: "failed",
+      cost: { kind: "reported", usd: 0.008 },
+    });
+    expect(manifest.products.P01?.active).toBeNull();
+  });
+
+  it("records completion after the provider request, not at request start", async () => {
+    const storage = await makeStorage();
+    const id = attemptId(22);
+    const startedAt = new Date(Date.now() - 10_000);
+    const mock = await startMock(async (_request, response) => {
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      json(response, 200, imageResponse(pngBytes(32, 32)));
+    });
+
+    const result = await run(storage, mock.env, { attemptId: id, now: startedAt });
+    expect(result.status).toBe("succeeded");
+    const manifest = await loadImageManifest(storage);
+    const attempt = manifest.products.P01?.attempts[0];
+    expect(attempt?.startedAt).toBe(startedAt.toISOString());
+    expect(new Date(attempt?.finishedAt ?? 0).getTime()).toBeGreaterThan(
+      startedAt.getTime(),
+    );
+    expect(
+      new Date(manifest.products.P01?.active?.publishedAt ?? 0).getTime(),
+    ).toBeGreaterThanOrEqual(new Date(attempt?.finishedAt ?? 0).getTime());
   });
 
   it("handles network and timeout failures with unknown cost and no publish", async () => {

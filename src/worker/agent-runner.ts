@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -20,6 +20,7 @@ import {
   type AgentWorkerResultMessage,
   type AgentWorkerUsage,
 } from "../lib/agent-ipc";
+import { terminateOwnedAgentProcesses } from "../server/agent-group";
 import { parseLoopbackOrigin } from "../server/config";
 import { normalizeOpenRouterKey } from "../server/openrouter";
 import { createStorage, type Storage } from "../server/storage";
@@ -33,6 +34,19 @@ import { createStorage, type Storage } from "../server/storage";
  * bounded redacted IPC messages, and always closes the browser and removes the
  * disposable profile and workspace in `finally`.
  */
+
+export const AGENT_WORKER_ORPHAN_DEADLINE_MS = 30_000;
+
+function orphanDeadlineMs(): number {
+  const raw = process.env.AGENT_WORKER_ORPHAN_DEADLINE_MS;
+  if (process.env.LAB_TEST_MODE !== "1" || !raw) {
+    return AGENT_WORKER_ORPHAN_DEADLINE_MS;
+  }
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) && parsed >= 100 && parsed <= 120_000
+    ? parsed
+    : AGENT_WORKER_ORPHAN_DEADLINE_MS;
+}
 
 export const AGENT_WORKER_INSTRUCTIONS = [
   "Use only the configured local application at the URL given in the task.",
@@ -145,7 +159,14 @@ async function runWorker(): Promise<number> {
     protocolViolation: false,
     sequence: 0,
     eventsEmitted: 0,
+    pendingImageContent: false,
     imageInputObserved: false,
+    pageActionObserved: false,
+    navigationObserved: false,
+    finalUrl: null as string | null,
+    profileDir: null as string | null,
+    workspace: null as string | null,
+    orphanTimer: null as NodeJS.Timeout | null,
     controller: null as AbortController | null,
     agent: null as BrowserUse | null,
   };
@@ -246,7 +267,13 @@ async function runWorker(): Promise<number> {
     const raw = event as { result?: unknown };
     const imageContent =
       normalized.kind === "tool_end" && containsImageContent(raw.result);
-    if (imageContent) state.imageInputObserved = true;
+    // A tool result containing an image is not model input yet. Only a
+    // subsequent model turn proves the image entered an outbound request;
+    // a run that stops at a budget boundary stays unverified.
+    if (normalized.kind === "turn_start" && state.pendingImageContent) {
+      state.imageInputObserved = true;
+    }
+    if (imageContent) state.pendingImageContent = true;
     if (state.eventsEmitted >= AGENT_WORKER_MAX_EVENTS) return;
     state.sequence += 1;
     state.eventsEmitted += 1;
@@ -319,6 +346,9 @@ async function runWorker(): Promise<number> {
       durationMs: safeInt(result?.durationMs),
       usage: usageFrom(result),
       imageInputObserved: state.imageInputObserved,
+      pageActionObserved: state.pageActionObserved,
+      navigationObserved: state.navigationObserved,
+      finalUrl: state.finalUrl,
     };
   };
 
@@ -335,6 +365,46 @@ async function runWorker(): Promise<number> {
     return (override
       ? await import(override)
       : await import("@browser_use/pi")) as typeof import("@browser_use/pi");
+  };
+
+  const readRecordingEvidence = async (
+    result: RunResult<unknown> | null,
+  ): Promise<void> => {
+    const path =
+      result && typeof (result as { recordingPath?: unknown }).recordingPath === "string"
+        ? (result as { recordingPath: string }).recordingPath
+        : null;
+    if (!path) return;
+    try {
+      const raw = JSON.parse(await readFile(path, "utf8")) as unknown;
+      if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return;
+      const frames = (raw as { frames?: unknown }).frames;
+      if (!Array.isArray(frames)) return;
+      const nonAction = new Set([
+        "Browser",
+        "completed",
+        "failed",
+        "error",
+        "incomplete",
+        "cancelled",
+        "timeout",
+        "cost_limit",
+        "max_steps",
+        "context_limit",
+        "stopping",
+      ]);
+      for (const frame of frames.slice(0, 50)) {
+        if (typeof frame !== "object" || frame === null || Array.isArray(frame)) {
+          continue;
+        }
+        const label = (frame as { label?: unknown }).label;
+        if (typeof label !== "string" || nonAction.has(label)) continue;
+        state.pageActionObserved = true;
+        if (label === "Navigate") state.navigationObserved = true;
+      }
+    } catch (error) {
+      logError(`The page-action recording could not be read: ${messageOf(error)}`, key);
+    }
   };
 
   const runTask = async (
@@ -358,6 +428,43 @@ async function runWorker(): Promise<number> {
     }
   };
 
+  const armOrphanDeadline = (): void => {
+    if (state.orphanTimer !== null || !state.profileDir) return;
+    state.orphanTimer = setTimeout(() => {
+      state.orphanTimer = null;
+      const profileDir = state.profileDir;
+      if (!profileDir) return;
+      logError(
+        "The parent process is gone and browser cleanup exceeded its deadline; terminating owned browser processes.",
+        key,
+      );
+      const workspace = state.workspace;
+      void terminateOwnedAgentProcesses(profileDir)
+        .catch((error: unknown) => {
+          logError(
+            `Worker-side orphan cleanup failed: ${messageOf(error)}`,
+            key,
+          );
+          return undefined;
+        })
+        .finally(async () => {
+          await Promise.all([
+            rm(profileDir, { recursive: true, force: true }).catch(
+              () => undefined,
+            ),
+            workspace
+              ? rm(workspace, { recursive: true, force: true }).catch(
+                  () => undefined,
+                )
+              : Promise.resolve(),
+          ]);
+          process.exit(1);
+        });
+    }, orphanDeadlineMs());
+    // Keep this timer referenced: a hung close may leave no other handles, and
+    // the process must stay alive long enough to terminate its browser.
+  };
+
   const executeRun = async (message: AgentStartMessage): Promise<number> => {
     state.phase = "running";
     state.runId = message.runId;
@@ -374,7 +481,9 @@ async function runWorker(): Promise<number> {
     try {
       try {
         profileDir = await storage.ensureDir(["browser-profiles", message.runId]);
+        state.profileDir = profileDir;
         workspace = await mkdtemp(join(tmpdir(), "ai-browser-lab-agent-worker-"));
+        state.workspace = workspace;
       } catch (error) {
         return await finishWithError(
           message.runId,
@@ -382,6 +491,7 @@ async function runWorker(): Promise<number> {
         );
       }
 
+      if (state.parentDisconnected) armOrphanDeadline();
       let agent: BrowserUse;
       const controller = new AbortController();
       state.controller = controller;
@@ -399,6 +509,9 @@ async function runWorker(): Promise<number> {
           prohibitedDomains: [],
           telemetry: false,
           highlightActions: true,
+          // Bounded recording supplies actual page-action labels (Navigate,
+          // Click, Type) without claiming a JavaScript cell is UI evidence.
+          recording: { intervalMs: 60_000, maxFrames: 8 },
           researchTools: false,
           log: false,
           maxOutputChars: AGENT_WORKER_MAX_OUTPUT_CHARS,
@@ -440,7 +553,41 @@ async function runWorker(): Promise<number> {
       state.heartbeatTimer = setInterval(sendHeartbeat, heartbeatMs);
       state.heartbeatTimer.unref?.();
 
+      // Presets embed the origin and custom tasks get it prepended, but an
+      // explicit navigation also guarantees the browser is not blank.
+      try {
+        await agent.execute(
+          `await page.goto(${JSON.stringify(config.origin)});`,
+        );
+      } catch (error) {
+        logError(
+          `The browser could not open the configured start URL: ${messageOf(error)}`,
+          key,
+        );
+      }
+
       const outcome = await runTask(agent, message, controller.signal);
+      await readRecordingEvidence(outcome.result);
+      try {
+        const cell = await agent.execute(
+          "console.log(JSON.stringify(await page.info()));",
+        );
+        const parsed = JSON.parse(cell.text.trim()) as unknown;
+        if (
+          typeof parsed === "object" &&
+          parsed !== null &&
+          !Array.isArray(parsed) &&
+          typeof (parsed as { url?: unknown }).url === "string"
+        ) {
+          const url = (parsed as { url: string }).url;
+          if (url.length <= 300) state.finalUrl = url;
+        }
+      } catch (error) {
+        logError(
+          `The final browser URL could not be read: ${messageOf(error)}`,
+          key,
+        );
+      }
       if (state.protocolViolation) {
         return await finishWithError(
           message.runId,
@@ -455,10 +602,13 @@ async function runWorker(): Promise<number> {
             : "The worker could not deliver its final result over IPC.",
           key,
         );
+        if (state.parentDisconnected) armOrphanDeadline();
         return 1;
       }
       return 0;
     } finally {
+      // A parent-disconnect timer stays armed through browser close: clearing
+      // it here would remove the only hard stop if close itself hangs.
       if (state.heartbeatTimer) {
         clearInterval(state.heartbeatTimer);
         state.heartbeatTimer = null;
@@ -520,6 +670,7 @@ async function runWorker(): Promise<number> {
         key,
       );
       requestCancel();
+      armOrphanDeadline();
       return;
     }
     logError("The parent process disconnected after the run finished.", key);

@@ -10,8 +10,11 @@ import {
   createEmptyImageManifest,
   deriveSetupState,
   inspectSetupState,
+  loadImageJob,
+  type ImageJobSnapshot,
   type SetupState,
 } from "./image-state";
+import { isImageJobLive } from "./image-job-liveness";
 import { createDefaultModelSettings, loadModelSettings } from "./model-settings";
 import { Storage, type StorageEnv } from "./storage";
 
@@ -95,8 +98,18 @@ export async function loadSetupView(
 
   let setup: SetupState;
   let setupError: string | null = null;
+  let liveJob: ImageJobSnapshot | null = null;
   try {
-    setup = await inspectSetupState(storage, { keyAvailable: key.keyAvailable });
+    liveJob = (await loadImageJob(storage)) ?? null;
+  } catch {
+    // inspectSetupState below reports unreadable image state with its own
+    // message; liveness simply stays false.
+  }
+  try {
+    setup = await inspectSetupState(storage, {
+      keyAvailable: key.keyAvailable,
+      jobIsLive: isImageJobLive(storage, liveJob),
+    });
   } catch {
     setup = deriveSetupState({
       keyAvailable: key.keyAvailable,

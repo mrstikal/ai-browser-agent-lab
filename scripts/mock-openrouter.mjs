@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { deflateSync } from "node:zlib";
 
 export const MOCK_OPENROUTER_MODEL_ID = "black-forest-labs/flux-3-image-klein";
 export const MOCK_OPENROUTER_PROVIDER_SLUG = "mock-provider";
@@ -7,23 +8,58 @@ export const MOCK_OPENROUTER_KEY = "sk-or-v1-e2e-dummy-mock-key";
 
 const MAX_BODY_BYTES = 64 * 1024;
 
-function writeUInt32BE(buffer, value, offset) {
-  buffer.writeUInt32BE(value >>> 0, offset);
+const CRC_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let index = 0; index < 256; index += 1) {
+    let value = index;
+    for (let bit = 0; bit < 8; bit += 1) {
+      value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+    }
+    table[index] = value >>> 0;
+  }
+  return table;
+})();
+
+function crc32(bytes) {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc = CRC_TABLE[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
 }
 
-/** Minimal valid PNG; the app validates bytes, format, and dimensions. */
+function pngChunk(type, data) {
+  const chunk = Buffer.alloc(12 + data.length);
+  chunk.writeUInt32BE(data.length, 0);
+  chunk.write(type, 4, "ascii");
+  data.copy(chunk, 8);
+  chunk.writeUInt32BE(crc32(chunk.subarray(4, 8 + data.length)), 8 + data.length);
+  return chunk;
+}
+
+/** Real, decodable RGBA PNG; validation now forces a bounded decode. */
 function pngBytes(width = 32, height = 32) {
-  const buffer = Buffer.alloc(8 + 25 + 12);
-  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(buffer, 0);
-  writeUInt32BE(buffer, 13, 8);
-  buffer.write("IHDR", 12, "ascii");
-  writeUInt32BE(buffer, width, 16);
-  writeUInt32BE(buffer, height, 20);
-  buffer[24] = 8;
-  buffer[25] = 6;
-  writeUInt32BE(buffer, 0, 33);
-  buffer.write("IEND", 37, "ascii");
-  return buffer;
+  const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 6;
+  const row = Buffer.alloc(1 + width * 4);
+  for (let x = 0; x < width; x += 1) {
+    row[1 + x * 4] = (x * 17) & 0xff;
+    row[2 + x * 4] = 0x40;
+    row[3 + x * 4] = 0x80;
+    row[4 + x * 4] = 0xff;
+  }
+  const raw = Buffer.alloc(row.length * height);
+  for (let y = 0; y < height; y += 1) row.copy(raw, y * row.length);
+  return Buffer.concat([
+    signature,
+    pngChunk("IHDR", ihdr),
+    pngChunk("IDAT", deflateSync(raw)),
+    pngChunk("IEND", Buffer.alloc(0)),
+  ]);
 }
 
 function json(response, status, body) {

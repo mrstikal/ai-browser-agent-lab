@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   AppConfigError,
   DEFAULT_APP_ORIGIN,
+  isTrustedHostHeader,
   resolveAppConfig,
 } from "../src/server/config";
 
@@ -75,5 +76,17 @@ describe("resolveAppConfig", () => {
     ["credentials", "http://user:pass@127.0.0.1:3000"],
   ])("rejects a %s origin", (_label, origin) => {
     expect(() => resolveAppConfig({ APP_ORIGIN: origin })).toThrow(AppConfigError);
+  });
+});
+
+describe("isTrustedHostHeader", () => {
+  it("accepts only the configured Host and rejects rebinding names", () => {
+    const env = { APP_ORIGIN: "http://127.0.0.1:4123" };
+    expect(isTrustedHostHeader("127.0.0.1:4123", env)).toBe(true);
+    expect(isTrustedHostHeader("127.0.0.1:4123 ", env)).toBe(true);
+    expect(isTrustedHostHeader("attacker.example:4123", env)).toBe(false);
+    expect(isTrustedHostHeader("localhost:4123", env)).toBe(false);
+    expect(isTrustedHostHeader(null, env)).toBe(false);
+    expect(isTrustedHostHeader("127.0.0.1:4123", { APP_ORIGIN: "bad" })).toBe(false);
   });
 });

@@ -701,7 +701,7 @@ function attemptFor(
 
 export interface AppendStartedAttemptOptions {
   readonly startedAt?: Date;
-  readonly cost?: ImageCost;
+  readonly cost?: ImageCost | undefined;
 }
 
 export function appendStartedAttempt(
@@ -753,7 +753,7 @@ export interface PublishAttemptOptions {
   readonly validation: ValidatedImage;
   readonly publishedAt?: Date;
   readonly finishedAt?: Date;
-  readonly cost?: ImageCost;
+  readonly cost?: ImageCost | undefined;
 }
 
 export function publishAttempt(
@@ -838,7 +838,7 @@ export function publishAttempt(
 export interface FinishAttemptOptions {
   readonly error: string;
   readonly finishedAt?: Date;
-  readonly cost?: ImageCost;
+  readonly cost?: ImageCost | undefined;
 }
 
 function finishAttempt(
@@ -928,7 +928,7 @@ export async function inspectActiveImages(
 
     let image: ValidatedImage;
     try {
-      image = validateImageBytes(bytes, { filename: active.filename });
+      image = await validateImageBytes(bytes, { filename: active.filename });
     } catch (error) {
       inspections.push({
         productId,
@@ -1207,7 +1207,7 @@ async function reconcileImagesUnlocked(
     }
 
     try {
-      const validation = validateImageBytes(bytes, { filename: file.name });
+      const validation = await validateImageBytes(bytes, { filename: file.name });
       const finishedAt = finishTimeAtOrAfter(attempt.startedAt, now);
       manifest = publishAttempt(manifest, parsed.productId, parsed.attemptId, {
         filename: file.name,

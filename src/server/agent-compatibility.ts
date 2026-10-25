@@ -42,6 +42,12 @@ export function parseAgentCompatibility(value: unknown): AgentCompatibilityRecor
       corrupted(`${field} must be a bounded string.`);
     }
   }
+  if (
+    !(record.modelId as string).startsWith("openrouter/") ||
+    (record.modelId as string).split("/").length < 3
+  ) {
+    corrupted("modelId must be an OpenRouter browser model.");
+  }
   if (Number.isNaN(Date.parse(record.verifiedAt as string))) {
     corrupted("verifiedAt must be an ISO timestamp.");
   }
