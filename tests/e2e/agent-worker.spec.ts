@@ -95,7 +95,7 @@ test("the Verify Agent Model action stamps the fixed Shop heading run", async ({
   );
   const button = page.getByTestId("verify-agent-model");
   await expect(button).toBeDisabled();
-  await page.getByRole("checkbox").check();
+  await page.getByTestId("verification-cost-confirm").check();
   await expect(button).toBeEnabled();
   const runStartedAt = Date.now();
   await button.click();
@@ -488,6 +488,147 @@ test("history keeps persisted runs, honest usage, and historical traces", async 
     "Seeded cancellation reason.",
   );
   await expect(cancelledItem).not.toContainText("Full task pass");
+});
+
+test("resilience comparison counts samples and requires confirmation for live repetition", async ({
+  page,
+  baseURL,
+}) => {
+  test.setTimeout(60_000);
+  if (!baseURL) throw new Error("The E2E base URL is missing.");
+  const dataDir = process.env.DATA_DIR;
+  if (!dataDir) throw new Error("The E2E DATA_DIR is missing.");
+  await seedKeyFile(dataDir);
+  await writeCompatibilityStamp(dataDir, baseURL);
+
+  const modelId = "openrouter/openai/gpt-5.6-luna";
+  const baseRecord = {
+    version: 2,
+    kind: "task",
+    presetId: "catalog-cheapest-home",
+    uiMode: "classic",
+    formBaseline: null,
+    modelId,
+    origin: baseURL,
+    limits: { maxSteps: 30, timeoutMs: 180_000, maxCostUsd: 1 },
+    status: "completed",
+    stopReason: "completed",
+    startedAt: "2026-01-02T00:00:00.000Z",
+    endedAt: "2026-01-02T00:00:05.000Z",
+    updatedAt: "2026-01-02T00:00:05.000Z",
+    steps: 3,
+    durationMs: 5_000,
+    outputText: null,
+    error: null,
+    usage: null,
+    imageInputObserved: false,
+    vision: "unverified",
+    evaluation: { status: "passed", reason: "Seeded pass." },
+    uiEvidence: "observed",
+    worker: null,
+    eventCount: 0,
+    lastSeq: 0,
+    cancelRequestedAt: null,
+    cancelReason: null,
+    watchdogExpiredAt: null,
+  };
+  const runsDir = join(dataDir, "agent-runs");
+  await mkdir(runsDir, { recursive: true, mode: 0o700 });
+  const seeded = [
+    { presetId: "catalog-cheapest-home", uiMode: "classic", evaluation: "passed", uiEvidence: "observed" },
+    { presetId: "catalog-cheapest-home", uiMode: "classic", evaluation: "failed", uiEvidence: "observed" },
+    { presetId: "catalog-cheapest-home", uiMode: "alternate", evaluation: "passed", uiEvidence: "observed" },
+    { presetId: "catalog-cheapest-home", uiMode: "alternate", evaluation: "passed", uiEvidence: "unverified" },
+    { presetId: "catalog-out-of-stock", uiMode: "classic", evaluation: "passed", uiEvidence: "observed" },
+  ] as const;
+  for (const [index, seed] of seeded.entries()) {
+    const runId = randomUUID();
+    await writeFile(
+      join(runsDir, `${runId}.json`),
+      `${JSON.stringify(
+        {
+          ...baseRecord,
+          runId,
+          presetId: seed.presetId,
+          uiMode: seed.uiMode,
+          task: `Seeded comparison run ${index + 1}.`,
+          evaluation: {
+            status: seed.evaluation,
+            reason:
+              seed.evaluation === "passed"
+                ? "Seeded pass."
+                : "Seeded failure.",
+          },
+          uiEvidence: seed.uiEvidence,
+          startedAt: `2026-01-02T00:0${index}:00.000Z`,
+          endedAt: `2026-01-02T00:0${index}:05.000Z`,
+          updatedAt: `2026-01-02T00:0${index}:05.000Z`,
+        },
+        null,
+        2,
+      )}
+`,
+    );
+  }
+
+  await page.goto("/agent");
+  const panel = page.getByTestId("resilience-panel");
+  await expect(panel).toBeVisible();
+  await expect(page.getByTestId("resilience-live-model")).toHaveText(modelId);
+
+  await page
+    .getByTestId("resilience-task-filter")
+    .selectOption("catalog-cheapest-home");
+  const classicRow = panel.locator(
+    '[data-testid="resilience-row"][data-preset-id="catalog-cheapest-home"][data-mode="classic"]',
+  );
+  const alternateRow = panel.locator(
+    '[data-testid="resilience-row"][data-preset-id="catalog-cheapest-home"][data-mode="alternate"]',
+  );
+  await expect(classicRow.getByTestId("resilience-full-passes")).toHaveText(
+    "1",
+  );
+  await expect(classicRow.getByTestId("resilience-sample-size")).toHaveText("2");
+  await expect(alternateRow.getByTestId("resilience-full-passes")).toHaveText(
+    "1",
+  );
+  await expect(alternateRow.getByTestId("resilience-sample-size")).toHaveText(
+    "2",
+  );
+
+  await page
+    .getByTestId("resilience-task-filter")
+    .selectOption("catalog-out-of-stock");
+  const singleRow = panel.locator(
+    '[data-testid="resilience-row"][data-preset-id="catalog-out-of-stock"][data-mode="classic"]',
+  );
+  await expect(singleRow.getByTestId("resilience-full-passes")).toHaveText(
+    "1",
+  );
+  await expect(singleRow).toContainText("Single run");
+  await expect(singleRow).toContainText("not statistically reliable");
+
+  await page
+    .getByTestId("resilience-task-filter")
+    .selectOption("catalog-cheapest-home");
+  const liveButton = page.getByTestId("resilience-run-live");
+  await expect(liveButton).toBeDisabled();
+  await page.getByTestId("resilience-cost-confirm").check();
+  await expect(liveButton).toBeEnabled();
+  await liveButton.click();
+  await expect(page.getByTestId("agent-task-feedback")).toContainText(
+    "Preset task run started",
+    { timeout: 15_000 },
+  );
+  await expect(liveButton).toBeDisabled();
+  await expect(classicRow.getByTestId("resilience-sample-size")).toHaveText(
+    "3",
+    { timeout: 30_000 },
+  );
+  await expect(page.getByTestId("resilience-cost-confirm")).not.toBeChecked();
+  await expect(liveButton).toBeDisabled();
+  await page.getByTestId("resilience-cost-confirm").check();
+  await expect(liveButton).toBeEnabled();
 });
 
 test("dashboard refuses a duplicate run and renders cancellation", async ({

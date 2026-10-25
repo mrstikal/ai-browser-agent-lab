@@ -10,6 +10,7 @@ import {
 } from "@/lib/agent-dashboard-view";
 import { mergeAgentRunSummary } from "@/lib/agent-history";
 import type { AgentRunLimits } from "@/lib/agent-ipc";
+import type { AgentUiMode } from "@/lib/agent-ui-mode";
 import type { AgentTaskStartRequest } from "@/lib/agent-tasks";
 import {
   AGENT_STREAM_VERSION,
@@ -22,6 +23,7 @@ import {
 } from "@/lib/agent-trace";
 import type { AgentRunRecord } from "@/server/agent-runs";
 import { HistoryPanel } from "./history-panel";
+import { ResiliencePanel } from "./resilience-panel";
 import { TaskPanel } from "./task-panel";
 import { TracePanel, type AgentStreamConnection } from "./trace-panel";
 import { VerificationPanel } from "./verification-panel";
@@ -121,6 +123,7 @@ export interface TaskLimitsCaps {
 
 export interface AgentDashboardProps {
   readonly initial: AgentDashboardView;
+  readonly uiMode: AgentUiMode;
   readonly initialTrace: AgentTraceState;
   readonly initialTraceError: string | null;
   readonly initialCorruptRuns: number;
@@ -132,6 +135,7 @@ export interface AgentDashboardProps {
 
 export function AgentDashboard({
   initial,
+  uiMode,
   initialTrace,
   initialTraceError,
   initialCorruptRuns,
@@ -706,6 +710,16 @@ export function AgentDashboard({
         feedback={feedback}
         onRun={startTask}
         onCancel={(runId) => void cancelRun(runId)}
+      />
+      <ResiliencePanel
+        runs={view.history}
+        gate={view.gate}
+        uiMode={uiMode}
+        defaults={taskDefaults}
+        caps={taskCaps}
+        runActive={runActive}
+        busy={busy}
+        onRun={startTask}
       />
       <HistoryPanel
         history={view.history}

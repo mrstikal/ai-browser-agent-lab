@@ -84,6 +84,7 @@ export default async function AgentPage() {
       {status && view ? (
         <AgentDashboard
           initial={view}
+          uiMode={uiModeView.mode}
           initialTrace={initialTrace}
           initialTraceError={initialTraceError}
           initialCorruptRuns={status.corruptRuns}

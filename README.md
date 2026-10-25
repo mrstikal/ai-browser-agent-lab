@@ -33,6 +33,9 @@ acceptance is deliberately separate:
 - Classic and Alternate layouts are available on the catalog, forms, and agent pages.
   They change only arrangement; data, routes, labels, and task instructions stay the
   same. Each new agent run records the mode at its start.
+- The optional mode resilience comparison on `/agent` reads stored runs and never
+  rewrites them. It reports full-pass counts by model, task, mode, and sample size; a
+  live repeat needs a fresh cost confirmation.
 
 The development checkout has a recorded authorized heading observation for the tuple
 `openrouter/openai/gpt-5.6-luna`, `@browser_use/pi` `0.1.0`, and
@@ -318,6 +321,31 @@ The dashboard keeps these concepts separate:
 A **full task pass** requires completed execution, a passed business evaluation, and
 observed UI evidence. A completed process alone is not a pass.
 
+### Mode resilience comparison
+
+The `/agent` dashboard includes a descriptive comparison of stored predefined-task
+outcomes. It reads the newest 50 stored runs shown by the dashboard; it never rewrites or
+starts a run by itself.
+
+- Filter by predefined task and model. Each row includes the model, task, layout mode,
+  full-pass count, business-pass count, and sample size.
+- **Success** is the strict full task pass: completed execution, an independent
+  evaluation pass, and observed UI evidence. A business pass with a cancelled, incomplete,
+  or UI-unverified run is reported separately, not as success.
+- Active runs, custom tasks, verification runs, and old runs without a captured mode are
+  excluded and counted in the panel note.
+- A single run is labeled anecdotal. Samples below five are labeled descriptive only, and
+  the panel performs no significance test or confidence interval. It does not present a
+  single run as statistically reliable evidence.
+- Rows for both modes remain visible even when one side has no sample, with a note that
+  the pair needs terminal runs in both modes.
+
+**Collect another sample (live)** is separate from the comparison table. It uses the
+current layout and current verified model, and it requires a fresh checkbox confirmation
+for every repetition. The displayed limits are the normal agent defaults and server hard
+caps; usage is an SDK estimate, not a provider invoice, and the soft cap can be exceeded
+by one response. Switching the layout first is what adds the other mode.
+
 ### Cancellation, process cleanup, and manual recovery
 
 - **Cancel** asks the worker to stop cooperatively. The supervisor waits a short grace
@@ -453,7 +481,8 @@ npm run smoke:built-worker
   temporary `DATA_DIR`, runs Playwright against a loopback dev server with system Chrome,
   and removes the mock/temp data afterwards. It covers the full 24-image mock flow, forms,
   catalog, setup/progress, image delivery, agent dashboard/worker, server lock, and
-  mutation guard, including the layout toggle.
+  mutation guard, including the layout toggle and the mode comparison with its live
+  cost confirmation.
 - `npm run test:e2e:alternate` seeds the disposable test data with Alternate and reruns
   the existing catalog and form Playwright specs. The default suite starts in Classic, so
   the same assertions are proven in both arrangements. The harness options
@@ -514,6 +543,7 @@ Never point `OPENROUTER_BASE_URL` at a remote host, never use the test seams wit
 | Agent run is `hung`, or a browser process remains | Restart the app and let startup recovery verify/terminate the recorded group. Inspect `data/agent-recovery.json`, `data/locks/paid-job.lock`, and `data/browser-profiles/`. Do not delete locks before confirming processes are gone. |
 | Corrupt saved state | Inspect the named JSON file under `data/`; the app reports corruption rather than discarding data. Fix or restore the file, or perform a deliberate full reset. |
 | Layout shows Classic despite a saved choice, or the layout cannot change | Inspect `data/ui-settings.json`. A corrupt optional layout setting falls back to Classic on catalog/form/agent pages with a warning and blocks a new agent run as `state-unreadable`; fix or remove the file deliberately. A `409 paid-operation-active` response means an image batch, agent run, or another layout change is active. |
+| Comparison has no rows or only one mode | The table uses terminal predefined-task runs with a captured mode from the newest 50 runs. Run a preset in each layout. The comparison never starts runs automatically; use the live section with its cost confirmation. |
 | Image or job state is incomplete after a crash | Restart once so local recovery can reconcile matching attempts and mark the job interrupted. Then use a fresh quote and confirmation to resume. |
 | E2E refuses a base-URL override | The override requires `LAB_TEST_MODE=1` and a disposable `DATA_DIR` under the OS temp root outside the project. Use the provided `npm run test:e2e` harness instead of a real data directory. |
 | Dev server behaves oddly after a production build | Stop it and remove only the dev cache (`.next/dev`), then restart. Do not delete `data/` to fix a cache issue. |
@@ -525,5 +555,5 @@ Never point `OPENROUTER_BASE_URL` at a remote host, never use the test seams wit
 - One server per data directory and one paid operation at a time are enforced. Agent runs
   are limited to one active run.
 - Paid live image/agent acceptance remains separately approved and unverified until
-  actually observed. The optional alternate UI is implemented; the optional resilience
-  comparison is not part of the core implementation.
+  actually observed. The optional alternate UI and resilience comparison are
+  implemented; they do not replace live acceptance.

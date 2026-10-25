@@ -150,6 +150,7 @@ export function VerificationPanel({
         <label className="flex items-start gap-2 text-sm text-amber-950">
           <input
             type="checkbox"
+            data-testid="verification-cost-confirm"
             checked={confirmed}
             disabled={busy !== null || runActive}
             onChange={(event) => onConfirmedChange(event.target.checked)}
