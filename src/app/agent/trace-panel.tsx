@@ -29,6 +29,7 @@ export interface TracePanelProps {
   readonly connection: AgentStreamConnection;
   readonly pollingStopped: boolean;
   readonly error: string | null;
+  readonly selectedRunId: string | null;
 }
 
 export function TracePanel({
@@ -36,6 +37,7 @@ export function TracePanel({
   connection,
   pollingStopped,
   error,
+  selectedRunId,
 }: TracePanelProps) {
   const summary = summarizeAgentTrace(trace.events);
 
@@ -46,7 +48,7 @@ export function TracePanel({
     >
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h2 id="agent-trace-heading" className="text-lg font-semibold">
-          Live trace
+          Agent trace
         </h2>
         <span
           data-testid="agent-trace-connection"
@@ -64,9 +66,20 @@ export function TracePanel({
 
       <p className="text-sm text-slate-600">
         The visible Chromium window is the primary visualization. This trace is
-        the persisted chronological event list for the current or last task
-        run, replayed after a refresh or reconnect.
+        the persisted chronological event list for the active or latest task
+        run, or for a run selected from the saved history. It is replayed after
+        a refresh or reconnect.
       </p>
+
+      {trace.runId !== null ? (
+        <p data-testid="agent-trace-run" className="text-xs text-slate-500">
+          Run <code className="break-all">{trace.runId}</code>
+          {" · "}
+          {selectedRunId === trace.runId
+            ? "selected from saved history"
+            : "following the active/latest task"}
+        </p>
+      ) : null}
 
       {connection === "fallback" ? (
         <p className="text-sm text-amber-900">
@@ -89,8 +102,9 @@ export function TracePanel({
       {trace.runId === null ? (
         error ? null : (
           <p data-testid="agent-trace-empty" className="text-sm text-slate-600">
-            No task trace yet. The first browser action appears here after a
-            task starts.
+            {selectedRunId === null
+              ? "No task trace yet. The first browser action appears here after a task starts."
+              : "The selected run has no readable persisted trace."}
           </p>
         )
       ) : (
@@ -139,6 +153,14 @@ export function TracePanel({
           {trace.events.length >= AGENT_TRACE_MAX_EVENTS ? (
             <p className="text-sm text-slate-600">
               Showing the most recent {AGENT_TRACE_MAX_EVENTS} events.
+            </p>
+          ) : null}
+          {trace.events.length === 0 && error === null ? (
+            <p
+              data-testid="agent-trace-no-events"
+              className="text-sm text-slate-600"
+            >
+              This run has no persisted trace events.
             </p>
           ) : null}
 

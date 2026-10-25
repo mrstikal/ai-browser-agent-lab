@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -258,6 +259,237 @@ test("trace renders hostile tool names as plain text", async ({
   await expect(traceEvents.locator("img")).toHaveCount(0);
 });
 
+test("history keeps persisted runs, honest usage, and historical traces", async ({
+  page,
+  request,
+  baseURL,
+}) => {
+  if (!baseURL) throw new Error("The E2E base URL is missing.");
+  const dataDir = process.env.DATA_DIR;
+  if (!dataDir) throw new Error("The E2E DATA_DIR is missing.");
+  await seedKeyFile(dataDir);
+  await writeCompatibilityStamp(dataDir, baseURL);
+
+  await page.goto("/agent");
+  const runTask = async (task: string): Promise<void> => {
+    await page.getByTestId("agent-task-input").fill(task);
+    await page.getByTestId("agent-run-task").click();
+    await expect(page.getByTestId("agent-run-execution")).toHaveText(
+      "Execution completed",
+      { timeout: 30_000 },
+    );
+    await expect(page.getByTestId("agent-run-task")).toBeEnabled({
+      timeout: 15_000,
+    });
+  };
+
+  await runTask("Read the heading [[xss]]");
+  await runTask("Read the main heading after history check.");
+
+  const statusResponse = await request.get("/api/agent/status");
+  expect(statusResponse.status()).toBe(200);
+  const statusBody = (await statusResponse.json()) as {
+    runs: Array<{ runId: string; kind: string; task: string }>;
+  };
+  const xssRun = statusBody.runs.find(
+    (run) => run.kind === "task" && run.task.includes("[[xss]]"),
+  );
+  const latestRun = statusBody.runs.find(
+    (run) =>
+      run.kind === "task" &&
+      run.task === "Read the main heading after history check.",
+  );
+  if (!xssRun || !latestRun) {
+    throw new Error("The history test runs were not persisted.");
+  }
+
+  const xssItem = page.locator(`[data-run-id="${xssRun.runId}"]`);
+  await expect(xssItem).toBeVisible();
+  await expect(xssItem.getByTestId("agent-history-execution")).toContainText(
+    "Execution completed",
+  );
+  await expect(xssItem.getByTestId("agent-history-result")).toHaveText(
+    "Not evaluated",
+  );
+  await expect(xssItem.getByTestId("agent-history-ui-evidence")).toHaveText(
+    "Unverified",
+  );
+  await expect(xssItem.getByTestId("agent-history-vision")).toHaveText(
+    "Unverified",
+  );
+  await expect(xssItem.getByTestId("agent-history-ui-mode")).toHaveText(
+    "not captured",
+  );
+  await expect(xssItem.getByTestId("agent-history-usage")).toContainText(
+    "15 tokens",
+  );
+  await expect(xssItem.getByTestId("agent-history-usage")).toContainText(
+    "$0.01",
+  );
+  await expect(xssItem.getByTestId("agent-history-model")).toHaveText(
+    "openrouter/openai/gpt-5.6-luna",
+  );
+  await expect(xssItem.getByTestId("agent-history-started")).toHaveText(
+    /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}Z$/,
+  );
+  await expect(xssItem.getByTestId("agent-history-ended")).toHaveText(
+    /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}Z$/,
+  );
+  await expect(xssItem.getByTestId("agent-history-steps")).toHaveText(
+    /^\d+ steps · .+$/,
+  );
+  await expect(xssItem.getByTestId("agent-history-steps")).not.toContainText(
+    "unknown",
+  );
+  await expect(xssItem).not.toContainText("Full task pass");
+
+  await xssItem.getByTestId("agent-history-select").click();
+  await expect(page.getByTestId("agent-trace-run")).toContainText(xssRun.runId);
+  await expect(page.getByTestId("agent-trace-run")).toContainText(
+    "selected from saved history",
+  );
+  await expect(page.getByTestId("agent-trace-count")).toHaveText("5", {
+    timeout: 15_000,
+  });
+  const hostile = '<img src=x onerror="alert(1)">';
+  await expect(page.getByTestId("agent-trace-events")).toContainText(hostile);
+  await expect(page.getByTestId("agent-trace-events").locator("img")).toHaveCount(
+    0,
+  );
+
+  const latestItem = page.locator(`[data-run-id="${latestRun.runId}"]`);
+  await expect(latestItem.getByTestId("agent-history-ui-evidence")).toHaveText(
+    "Observed",
+  );
+  await latestItem.getByTestId("agent-history-select").click();
+  await expect(page.getByTestId("agent-trace-run")).toContainText(
+    latestRun.runId,
+  );
+  await expect(page.getByTestId("agent-trace-count")).toHaveText("5", {
+    timeout: 15_000,
+  });
+  await expect(page.getByTestId("agent-trace-events")).not.toContainText(
+    hostile,
+  );
+
+  await page.getByTestId("agent-history-follow").click();
+  await expect(page.getByTestId("agent-trace-run")).toContainText(
+    latestRun.runId,
+  );
+  await expect(page.getByTestId("agent-trace-connection")).toHaveText("Live", {
+    timeout: 15_000,
+  });
+
+  // Seed old records to prove the bounded history survives a page/restart
+  // reload and keeps unknown usage and a cancelled preset run honest.
+  const baseRecord = {
+    version: 2,
+    kind: "task",
+    presetId: null,
+    uiMode: null,
+    formBaseline: null,
+    modelId: "openrouter/openai/gpt-5.6-luna",
+    origin: baseURL,
+    limits: { maxSteps: 30, timeoutMs: 180_000, maxCostUsd: 1 },
+    status: "completed",
+    stopReason: "completed",
+    startedAt: "2026-01-01T00:00:00.000Z",
+    endedAt: "2026-01-01T00:00:05.000Z",
+    updatedAt: "2026-01-01T00:00:05.000Z",
+    steps: null,
+    durationMs: null,
+    outputText: null,
+    error: null,
+    usage: null,
+    imageInputObserved: false,
+    vision: "unverified",
+    evaluation: { status: "not_evaluated", reason: null },
+    uiEvidence: "unverified",
+    worker: null,
+    eventCount: 0,
+    lastSeq: 0,
+    cancelRequestedAt: null,
+    cancelReason: null,
+    watchdogExpiredAt: null,
+  };
+  const unknownRunId = randomUUID();
+  const cancelledRunId = randomUUID();
+  const runsDir = join(dataDir, "agent-runs");
+  await mkdir(runsDir, { recursive: true, mode: 0o700 });
+  await writeFile(
+    join(runsDir, `${unknownRunId}.json`),
+    `${JSON.stringify(
+      {
+        ...baseRecord,
+        runId: unknownRunId,
+        task: "Seeded run without SDK usage.",
+        uiMode: "alternate",
+        startedAt: "2026-01-01T00:02:00.000Z",
+        endedAt: "2026-01-01T00:02:05.000Z",
+        updatedAt: "2026-01-01T00:02:05.000Z",
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  await writeFile(
+    join(runsDir, `${cancelledRunId}.json`),
+    `${JSON.stringify(
+      {
+        ...baseRecord,
+        runId: cancelledRunId,
+        presetId: "catalog-cheapest-home",
+        task: "Seeded cancelled preset run.",
+        stopReason: "cancelled",
+        error: "Seeded cancellation reason.",
+        startedAt: "2026-01-01T00:01:00.000Z",
+        endedAt: "2026-01-01T00:01:05.000Z",
+        updatedAt: "2026-01-01T00:01:05.000Z",
+        evaluation: {
+          status: "passed",
+          reason: "The evaluator matched the answer.",
+        },
+        uiEvidence: "observed",
+        usage: {
+          inputTokens: 10,
+          outputTokens: 5,
+          totalTokens: 15,
+          estimatedCostUsd: 0.01,
+        },
+      },
+      null,
+      2,
+    )}\n`,
+  );
+
+  await page.reload();
+  const unknownItem = page.locator(`[data-run-id="${unknownRunId}"]`);
+  await expect(unknownItem).toBeVisible();
+  await expect(unknownItem.getByTestId("agent-history-usage")).toContainText(
+    "unknown",
+  );
+  await expect(unknownItem.getByTestId("agent-history-usage")).not.toContainText(
+    "$0.00",
+  );
+  await expect(unknownItem.getByTestId("agent-history-ui-mode")).toHaveText(
+    "Alternate",
+  );
+  await expect(unknownItem.getByTestId("agent-history-error")).toHaveCount(0);
+
+  const cancelledItem = page.locator(`[data-run-id="${cancelledRunId}"]`);
+  await expect(cancelledItem).toBeVisible();
+  await expect(
+    cancelledItem.getByTestId("agent-history-execution"),
+  ).toContainText("Execution stopped (cancelled)");
+  await expect(cancelledItem.getByTestId("agent-history-result")).toContainText(
+    "Business result passed; execution not completed",
+  );
+  await expect(cancelledItem.getByTestId("agent-history-error")).toContainText(
+    "Seeded cancellation reason.",
+  );
+  await expect(cancelledItem).not.toContainText("Full task pass");
+});
+
 test("dashboard refuses a duplicate run and renders cancellation", async ({
   page,
   request,
@@ -307,6 +539,28 @@ test("dashboard refuses a duplicate run and renders cancellation", async ({
     "Not evaluated",
   );
   await expect(runButton).toBeEnabled({ timeout: 15_000 });
+
+  const statusResponse = await request.get("/api/agent/status");
+  expect(statusResponse.status()).toBe(200);
+  const statusBody = (await statusResponse.json()) as {
+    runs: Array<{ runId: string; kind: string; task: string }>;
+  };
+  const cancelledRun = statusBody.runs.find(
+    (run) => run.kind === "task" && run.task === "Hold the run [[cancel]]",
+  );
+  if (!cancelledRun) {
+    throw new Error("The cancelled run was not persisted.");
+  }
+  const historyItem = page.locator(`[data-run-id="${cancelledRun.runId}"]`);
+  await expect(historyItem).toBeVisible();
+  await expect(historyItem.getByTestId("agent-history-execution")).toContainText(
+    "Execution stopped (cancelled)",
+  );
+  await expect(historyItem.getByTestId("agent-history-result")).toHaveText(
+    "Not evaluated",
+  );
+  await expect(historyItem.getByTestId("agent-history-error")).toBeVisible();
+  await expect(historyItem).not.toContainText("Full task pass");
 
   const marker = JSON.parse(
     await readFile(join(dataDir, "agent-test-markers", "cancel.json"), "utf8"),

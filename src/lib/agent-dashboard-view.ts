@@ -1,5 +1,9 @@
 import type { AgentGate } from "@/server/agent-manager";
 import type { AgentRunRecord } from "@/server/agent-runs";
+import {
+  buildAgentHistory,
+  type AgentRunSummary,
+} from "./agent-history";
 
 /**
  * Minimal, serializable dashboard view shared by the server-rendered `/agent`
@@ -12,6 +16,8 @@ export interface AgentDashboardView {
   readonly activeRun: AgentRunRecord | null;
   readonly latestVerification: AgentRunRecord | null;
   readonly latestTask: AgentRunRecord | null;
+  /** Newest-first, bounded summaries of persisted runs. */
+  readonly history: readonly AgentRunSummary[];
 }
 
 export interface AgentStatusLike {
@@ -35,21 +41,36 @@ export function pickAgentDashboardView(
     latestVerification:
       snapshot.runs.find((run) => run.kind === "verification") ?? null,
     latestTask: snapshot.runs.find((run) => run.kind === "task") ?? null,
+    history: buildAgentHistory(snapshot.runs),
   };
 }
 
+export interface AgentTraceTarget {
+  readonly runId: string;
+}
+
 /**
- * The trace follows the current task run and, after it settles, the latest
- * task run, so a refresh still shows the persisted chronological events.
+ * The trace follows an explicitly selected persisted run, otherwise the
+ * current task run, and after it settles the latest task run. An unreadable
+ * active record or a selected run outside the bounded history yields no trace
+ * instead of silently showing a different run.
  */
 export function selectTraceRun(
   view: AgentDashboardView,
-): AgentRunRecord | null {
-  if (view.activeRunId !== null) {
-    // An unreadable active record leaves the run kind unknown; showing an
-    // older task's trace here would misrepresent the active run.
-    if (view.activeRun === null) return null;
-    return view.activeRun.kind === "task" ? view.activeRun : view.latestTask;
+  selectedRunId: string | null = null,
+): AgentTraceTarget | null {
+  if (selectedRunId !== null) {
+    return view.history.some((run) => run.runId === selectedRunId)
+      ? { runId: selectedRunId }
+      : null;
   }
-  return view.latestTask;
+  if (view.activeRunId !== null) {
+    if (view.activeRun === null) return null;
+    return view.activeRun.kind === "task"
+      ? { runId: view.activeRun.runId }
+      : view.latestTask === null
+        ? null
+        : { runId: view.latestTask.runId };
+  }
+  return view.latestTask === null ? null : { runId: view.latestTask.runId };
 }

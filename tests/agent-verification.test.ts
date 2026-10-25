@@ -165,6 +165,7 @@ function makeRecord(overrides: Partial<AgentRunRecord> = {}): AgentRunRecord {
     runId: "11111111-1111-4111-8111-111111111111",
     kind: "verification",
     presetId: null,
+    uiMode: null,
     formBaseline: null,
     task: "Read the Shop heading.",
     modelId: DEFAULT_BROWSER_MODEL_ID,

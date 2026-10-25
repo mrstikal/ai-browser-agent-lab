@@ -4,11 +4,13 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  AGENT_RUN_LIST_LIMIT,
   AGENT_RUN_VERSION,
   AgentRunCorruptionError,
   agentRunFileSegments,
   isActiveAgentRunStatus,
   isTerminalAgentRunStatus,
+  listAgentRuns,
   loadAgentRun,
   parseAgentRunRecord,
   saveAgentRun,
@@ -74,6 +76,7 @@ describe("agent run records", () => {
       version: AGENT_RUN_VERSION,
       runId,
       status: "completed",
+      uiMode: null,
       cancelRequestedAt: null,
       cancelReason: null,
       watchdogExpiredAt: null,
@@ -94,6 +97,7 @@ describe("agent run records", () => {
     )) as Record<string, unknown>;
     expect(stored).toMatchObject({
       version: 2,
+      uiMode: null,
       cancelRequestedAt: "2026-10-24T00:00:05.000Z",
       cancelReason: "watchdog",
       watchdogExpiredAt: null,
@@ -137,6 +141,7 @@ describe("agent run records", () => {
     };
     expect(parseAgentRunRecord(v2).presetId).toBeNull();
     expect(parseAgentRunRecord(v2).formBaseline).toBeNull();
+    expect(parseAgentRunRecord(v2).uiMode).toBeNull();
     expect(
       parseAgentRunRecord({ ...v2, presetId: "catalog-out-of-stock" }).presetId,
     ).toBe("catalog-out-of-stock");
@@ -155,6 +160,15 @@ describe("agent run records", () => {
       form: "support",
       submissionIds: ["66666666-6666-4666-8666-666666666666"],
     });
+    expect(parseAgentRunRecord({ ...v2, uiMode: "classic" }).uiMode).toBe(
+      "classic",
+    );
+    expect(parseAgentRunRecord({ ...v2, uiMode: "alternate" }).uiMode).toBe(
+      "alternate",
+    );
+    expect(() =>
+      parseAgentRunRecord({ ...v2, uiMode: "fancy" }),
+    ).toThrow(AgentRunCorruptionError);
     expect(() =>
       parseAgentRunRecord({ ...v2, presetId: "catalog-unknown" }),
     ).toThrow(AgentRunCorruptionError);
@@ -199,6 +213,38 @@ describe("agent run records", () => {
     expect(() =>
       parseAgentRunRecord({ ...phase24Record(runId), unexpected: true }),
     ).toThrow(AgentRunCorruptionError);
+  });
+
+  it("retains a bounded newest-first history after reopening storage", async () => {
+    const storage = await makeStorage();
+    const baseTime = Date.parse("2026-10-24T00:00:00.000Z");
+    for (let index = 0; index < AGENT_RUN_LIST_LIMIT + 5; index += 1) {
+      const runId = randomUUID();
+      const startedAt = new Date(baseTime + index * 1_000).toISOString();
+      const record = parseAgentRunRecord({
+        ...phase24Record(runId),
+        version: 2,
+        cancelRequestedAt: null,
+        cancelReason: null,
+        watchdogExpiredAt: null,
+        startedAt,
+        endedAt: startedAt,
+        updatedAt: startedAt,
+      });
+      await saveAgentRun(storage, record);
+    }
+
+    const reopened = new Storage(storage.root);
+    const listed = await listAgentRuns(reopened);
+    expect(listed.corrupt).toBe(0);
+    expect(listed.runs).toHaveLength(AGENT_RUN_LIST_LIMIT);
+    expect(listed.runs[0]?.startedAt).toBe(
+      new Date(baseTime + (AGENT_RUN_LIST_LIMIT + 4) * 1_000).toISOString(),
+    );
+    expect(listed.runs.at(-1)?.startedAt).toBe(
+      new Date(baseTime + 5 * 1_000).toISOString(),
+    );
+    expect((await listAgentRuns(reopened, 10)).runs).toHaveLength(10);
   });
 
   it("separates active from terminal lifecycle statuses", () => {

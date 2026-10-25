@@ -5,11 +5,14 @@ import { pickAgentDashboardView } from "@/lib/agent-dashboard-view";
 import {
   describeExecutionStatus,
   describeGateBlocker,
+  describeHistoryResult,
   describeOverallTaskResult,
   describeStopReason,
   describeTaskResult,
+  describeUiMode,
   formatDuration,
   formatEstimatedCost,
+  formatRunTimestamp,
   formatTokens,
   shouldShowOverallTaskResult,
 } from "@/lib/agent-run-display";
@@ -20,6 +23,7 @@ function makeRun(overrides: Partial<AgentRunRecord> = {}): AgentRunRecord {
     runId: "11111111-1111-4111-8111-111111111111",
     kind: "task",
     presetId: null,
+    uiMode: null,
     formBaseline: null,
     task: "Read the main heading.",
     modelId: "openrouter/openai/gpt-5.6-luna",
@@ -183,6 +187,20 @@ describe("agent run display", () => {
     expect(formatDuration(1_500)).toBe("1.5 s");
   });
 
+  it("formats deterministic UTC run timestamps and UI modes", () => {
+    expect(formatRunTimestamp("2026-10-24T10:00:05.000Z")).toBe(
+      "2026-10-24 10:00:05Z",
+    );
+    expect(formatRunTimestamp("2026-10-24T12:00:05.000+02:00")).toBe(
+      "2026-10-24 10:00:05Z",
+    );
+    expect(formatRunTimestamp(null)).toBe("not finished");
+    expect(formatRunTimestamp("not-a-timestamp")).toBe("not-a-timestamp");
+    expect(describeUiMode(null)).toBe("not captured");
+    expect(describeUiMode("classic")).toBe("Classic");
+    expect(describeUiMode("alternate")).toBe("Alternate");
+  });
+
   it("explains missing-key and verification gate states", () => {
     expect(describeGateBlocker(makeGate())).toBeNull();
     expect(
@@ -320,6 +338,107 @@ describe("overall task result", () => {
   });
 });
 
+describe("history result labels", () => {
+  it("never summarizes a cancelled preset run as a full success", () => {
+    const result = describeHistoryResult(
+      makeRun({
+        presetId: "catalog-cheapest-home",
+        stopReason: "cancelled",
+        evaluation: { status: "passed", reason: "Matched." },
+        uiEvidence: "observed",
+      }),
+    );
+    expect(result).toMatchObject({
+      label: "Business result passed; execution not completed",
+      tone: "warning",
+      fullPass: false,
+    });
+  });
+
+  it("keeps a step-limited preset run out of full success", () => {
+    const result = describeHistoryResult(
+      makeRun({
+        presetId: "catalog-out-of-stock",
+        stopReason: "max_steps",
+        evaluation: { status: "passed", reason: "Matched." },
+        uiEvidence: "observed",
+      }),
+    );
+    expect(result).toMatchObject({
+      label: "Business result passed; execution not completed",
+      tone: "warning",
+      fullPass: false,
+    });
+  });
+
+  it("keeps hung and interrupted preset runs out of full success", () => {
+    for (const status of ["hung", "interrupted"] as const) {
+      const result = describeHistoryResult(
+        makeRun({
+          presetId: "catalog-cheapest-home",
+          status,
+          stopReason: status === "hung" ? "cancelled" : null,
+          evaluation: { status: "passed", reason: "Matched." },
+          uiEvidence: "observed",
+        }),
+      );
+      expect(result).toMatchObject({
+        label: "Business result passed; execution not completed",
+        tone: "warning",
+        fullPass: false,
+      });
+    }
+  });
+
+  it("labels verification outcomes honestly", () => {
+    expect(
+      describeHistoryResult(
+        makeRun({
+          kind: "verification",
+          presetId: null,
+          evaluation: { status: "passed", reason: "Heading matched." },
+        }),
+      ),
+    ).toMatchObject({
+      label: "Verification answer passed",
+      tone: "success",
+    });
+    expect(
+      describeHistoryResult(
+        makeRun({
+          kind: "verification",
+          presetId: null,
+          stopReason: "cancelled",
+          evaluation: { status: "passed", reason: "Heading matched." },
+        }),
+      ),
+    ).toMatchObject({
+      label: "Verification answer passed; execution not completed",
+      tone: "warning",
+    });
+    expect(
+      describeHistoryResult(
+        makeRun({
+          kind: "verification",
+          presetId: null,
+          evaluation: { status: "failed", reason: "Wrong heading." },
+        }),
+      ),
+    ).toMatchObject({ label: "Verification failed", tone: "danger" });
+  });
+
+  it("does not evaluate custom tasks", () => {
+    expect(
+      describeHistoryResult(
+        makeRun({
+          presetId: null,
+          evaluation: { status: "passed", reason: "Matched." },
+        }),
+      ),
+    ).toMatchObject({ label: "Not evaluated", tone: "neutral" });
+  });
+});
+
 describe("dashboard view", () => {
   it("selects the active run and the newest run of each kind", () => {
     const active = makeRun({
@@ -341,6 +460,8 @@ describe("dashboard view", () => {
     expect(view.activeRun?.runId).toBe(active.runId);
     expect(view.latestVerification?.runId).toBe(active.runId);
     expect(view.latestTask?.runId).toBe(task.runId);
+    expect(view.history).toHaveLength(3);
+    expect(view.history.map((run) => run.runId)).toContain(active.runId);
   });
 
   it("has no active run when the holder is idle", () => {

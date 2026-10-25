@@ -56,6 +56,7 @@ function makeRecord(overrides: Partial<AgentRunRecord> = {}): AgentRunRecord {
     runId: RUN_ID,
     kind: "task",
     presetId: "form-support-request",
+    uiMode: null,
     formBaseline: { form: "support", submissionIds: [] },
     task: "Form preset task",
     modelId: "openrouter/openai/gpt-5.6-luna",

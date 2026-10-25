@@ -1,6 +1,8 @@
 import type { AgentGate } from "@/server/agent-manager";
 import type { AgentRunRecord } from "@/server/agent-runs";
+import type { AgentRunSummary } from "./agent-history";
 import type { AgentRunStatus } from "./agent-ipc";
+import { AGENT_UI_MODE_LABELS, type AgentUiMode } from "./agent-ui-mode";
 import { formatUsd } from "./format";
 
 /**
@@ -104,6 +106,73 @@ export function describeTaskResult(
           "Runs without a deterministic evaluation are not automatically passed. Execution status is reported separately from task success.",
       };
   }
+}
+
+/**
+ * Honest one-line outcome for a persisted history row. A preset task uses the
+ * overall result, so a cancelled or limit-bound run can never be summarized as
+ * a full pass; verification and custom runs keep their own semantics.
+ */
+export function describeHistoryResult(
+  run: Pick<
+    AgentRunSummary,
+    "kind" | "presetId" | "status" | "stopReason" | "evaluation" | "uiEvidence"
+  >,
+): TaskResultDescription {
+  if (run.kind === "task" && run.presetId !== null) {
+    return describeOverallTaskResult(run);
+  }
+  if (run.kind === "verification") {
+    if (run.evaluation.status === "failed") {
+      return {
+        label: "Verification failed",
+        tone: "danger",
+        detail:
+          run.evaluation.reason ??
+          "The fixed browser verification did not pass.",
+      };
+    }
+    if (run.evaluation.status === "passed") {
+      if (run.status === "completed" && run.stopReason === "completed") {
+        return {
+          label: "Verification answer passed",
+          tone: "success",
+          detail:
+            run.evaluation.reason ??
+            "The model read the Shop heading from the running app; check the verification panel for the current stamp.",
+        };
+      }
+      return {
+        label: "Verification answer passed; execution not completed",
+        tone: "warning",
+        detail:
+          "The heading answer matched, but the run did not complete cleanly and no verification stamp was written from it.",
+      };
+    }
+    if (
+      run.status === "running" ||
+      run.status === "cancelling" ||
+      run.status === "hung"
+    ) {
+      return {
+        label: "Verification pending",
+        tone: "neutral",
+        detail: "The fixed heading check runs once the execution settles.",
+      };
+    }
+    return {
+      label: "Not evaluated",
+      tone: "neutral",
+      detail:
+        "No verification evaluation was recorded. Execution status is reported separately.",
+    };
+  }
+  return {
+    label: "Not evaluated",
+    tone: "neutral",
+    detail:
+      "Custom tasks are not automatically evaluated. Execution status is reported separately.",
+  };
 }
 
 export interface OverallTaskResult extends RunLabel {
@@ -213,6 +282,19 @@ export function formatDuration(durationMs: number | null): string {
   if (durationMs === null) return "unknown";
   if (durationMs < 1_000) return `${durationMs} ms`;
   return `${(durationMs / 1_000).toFixed(1)} s`;
+}
+
+/** Deterministic UTC label for persisted start/end timestamps. */
+export function formatRunTimestamp(at: string | null): string {
+  if (at === null) return "not finished";
+  const parsed = Date.parse(at);
+  if (!Number.isFinite(parsed)) return at;
+  return `${new Date(parsed).toISOString().slice(0, 19).replace("T", " ")}Z`;
+}
+
+/** Captured mode or an explicit "not captured" label, never a guess. */
+export function describeUiMode(mode: AgentUiMode | null): string {
+  return mode === null ? "not captured" : AGENT_UI_MODE_LABELS[mode];
 }
 
 export interface GateBlocker {

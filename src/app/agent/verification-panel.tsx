@@ -5,6 +5,7 @@ import type { AgentRunLimits } from "@/lib/agent-ipc";
 import {
   describeExecutionStatus,
   describeStopReason,
+  describeUiMode,
   formatDuration,
   formatEstimatedCost,
 } from "@/lib/agent-run-display";
@@ -234,6 +235,12 @@ export function VerificationPanel({
             <div>
               <dt className="font-medium text-slate-500">Estimated cost</dt>
               <dd>{formatEstimatedCost(latestVerification.usage)}</dd>
+            </div>
+            <div>
+              <dt className="font-medium text-slate-500">UI mode</dt>
+              <dd data-testid="verification-ui-mode">
+                {describeUiMode(latestVerification.uiMode)}
+              </dd>
             </div>
             <div>
               <dt className="font-medium text-slate-500">Vision evidence</dt>

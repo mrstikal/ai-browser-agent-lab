@@ -15,6 +15,10 @@ import {
   agentPresetTaskIdSchema,
   type AgentPresetTaskId,
 } from "../lib/agent-tasks";
+import {
+  agentUiModeSchema,
+  type AgentUiMode,
+} from "../lib/agent-ui-mode";
 import { modelIdSchema } from "../lib/schemas";
 import { Storage, StorageCorruptionError } from "./storage";
 
@@ -108,6 +112,11 @@ export const agentRunRecordSchema = z
     kind: agentRunKindSchema,
     /** Preset task ID; null for custom tasks and verification runs. */
     presetId: agentPresetTaskIdSchema.nullable().optional(),
+    /**
+     * Captured UI mode; null when the optional alternate UI was not in use or
+     * the record predates Phase 32.
+     */
+    uiMode: agentUiModeSchema.nullable().optional(),
     /** Existing submission IDs captured before a form-task worker launch. */
     formBaseline: agentFormBaselineSchema.nullable().optional(),
     task: z.string().min(1).max(AGENT_WORKER_MAX_TASK_CHARS),
@@ -160,6 +169,7 @@ export type AgentRunRecord = Omit<
   RawAgentRunRecord,
   | "version"
   | "presetId"
+  | "uiMode"
   | "formBaseline"
   | "cancelRequestedAt"
   | "cancelReason"
@@ -167,6 +177,7 @@ export type AgentRunRecord = Omit<
 > & {
   version: typeof AGENT_RUN_VERSION;
   presetId: AgentPresetTaskId | null;
+  uiMode: AgentUiMode | null;
   formBaseline: AgentFormBaseline | null;
   cancelRequestedAt: string | null;
   cancelReason: AgentRunCancelReason | null;
@@ -178,6 +189,7 @@ export function normalizeAgentRunRecord(raw: RawAgentRunRecord): AgentRunRecord 
     ...raw,
     version: AGENT_RUN_VERSION,
     presetId: raw.presetId ?? null,
+    uiMode: raw.uiMode ?? null,
     formBaseline: raw.formBaseline ?? null,
     cancelRequestedAt: raw.cancelRequestedAt ?? null,
     cancelReason: raw.cancelReason ?? null,

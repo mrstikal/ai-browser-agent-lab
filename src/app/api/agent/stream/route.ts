@@ -41,7 +41,31 @@ export function parseLastEventId(value: string | null): AgentTraceCursor | null 
   return { runId: match[1], seq };
 }
 
+/**
+ * `?run=<uuid>` pins the trace to a persisted run selected from history. An
+ * absent value keeps the default active/latest-task behavior; a present but
+ * malformed value is rejected instead of silently streaming another run.
+ */
+export function parseSelectedRunId(value: string | null): string | null {
+  if (value === null) return null;
+  return z.uuid().safeParse(value).success ? value : null;
+}
+
 export async function GET(request: Request): Promise<Response> {
+  const rawSelectedRunId = new URL(request.url).searchParams.get("run");
+  const selectedRunId = parseSelectedRunId(rawSelectedRunId);
+  if (rawSelectedRunId !== null && selectedRunId === null) {
+    return Response.json(
+      {
+        error: {
+          code: "invalid-run-id",
+          message: "The selected agent run ID must be a UUID.",
+        },
+      },
+      { status: 400, headers: { "cache-control": "no-store" } },
+    );
+  }
+
   let storage: ReturnType<typeof createStorage>;
   try {
     storage = createStorage();
@@ -127,7 +151,7 @@ export async function GET(request: Request): Promise<Response> {
             sent = true;
           }
 
-          const traceRun = selectTraceRun(view);
+          const traceRun = selectTraceRun(view, selectedRunId);
           if (traceRun === null) {
             if (lastTraceRunId !== null || !traceInitialized) {
               const payload: AgentTracePayload = {

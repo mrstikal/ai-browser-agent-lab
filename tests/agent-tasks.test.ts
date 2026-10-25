@@ -43,6 +43,7 @@ function makeRecord(overrides: Partial<AgentRunRecord> = {}): AgentRunRecord {
     runId: RUN_ID,
     kind: "task",
     presetId: "catalog-cheapest-home",
+    uiMode: null,
     formBaseline: null,
     task: "Preset task",
     modelId: "openrouter/openai/gpt-5.6-luna",

@@ -723,6 +723,7 @@ describe("agent supervisor", () => {
         runId: randomUUID(),
         kind: "verification",
         presetId: null,
+        uiMode: null,
         formBaseline: null,
         task: "Older verification run.",
         modelId: DEFAULT_BROWSER_MODEL_ID,
@@ -1437,8 +1438,18 @@ describe("agent supervisor", () => {
       expect(getActiveAgentRunId(context.storage.root)).toBe(runId);
       expect(await readProcessStartTicks(grandchildPid)).toBeDefined();
       // The unresolved group is recorded so the next boot retries it and
-      // keeps the barrier until the group is proven gone.
-      const report = await loadAgentRecoveryReport(context.storage);
+      // keeps the barrier until the group is proven gone. The supervisor
+      // persists the run note before the recovery report, so wait for the
+      // report entry instead of racing its asynchronous write.
+      let report = await loadAgentRecoveryReport(context.storage);
+      const reportDeadline = Date.now() + 5_000;
+      while (
+        Date.now() < reportDeadline &&
+        report?.runs.find((entry) => entry.runId === runId) === undefined
+      ) {
+        await sleep(50);
+        report = await loadAgentRecoveryReport(context.storage);
+      }
       expect(
         report?.runs.find((entry) => entry.runId === runId),
       ).toMatchObject({ outcome: "skipped", lock: "held" });

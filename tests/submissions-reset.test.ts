@@ -81,6 +81,7 @@ function runningAgentRecord(): AgentRunRecord {
     runId: "99999999-9999-4999-8999-999999999999",
     kind: "task",
     presetId: null,
+    uiMode: null,
     formBaseline: null,
     task: "Read the main heading.",
     modelId: "openrouter/openai/gpt-5.6-luna",

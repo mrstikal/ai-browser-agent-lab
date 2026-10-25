@@ -58,6 +58,7 @@ function runRecord(
     runId: overrides.runId,
     kind: "task",
     presetId: null,
+    uiMode: null,
     formBaseline: null,
     task: "Read the main heading.",
     modelId: "openrouter/openai/gpt-5.6-luna",

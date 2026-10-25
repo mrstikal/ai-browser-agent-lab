@@ -789,6 +789,7 @@ export async function startAgentRun(
     runId,
     kind: options.kind,
     presetId,
+    uiMode: null,
     formBaseline,
     task,
     modelId: gate.modelId,

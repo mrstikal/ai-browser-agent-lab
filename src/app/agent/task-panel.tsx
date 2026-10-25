@@ -17,6 +17,7 @@ import {
   describeOverallTaskResult,
   describeStopReason,
   describeTaskResult,
+  describeUiMode,
   formatDuration,
   formatEstimatedCost,
   formatTokens,
@@ -381,6 +382,12 @@ export function TaskPanel({
                 <dt className="font-medium text-slate-500">Vision evidence</dt>
                 <dd>
                   {displayRun.vision === "observed" ? "Observed" : "Unverified"}
+                </dd>
+              </div>
+              <div>
+                <dt className="font-medium text-slate-500">UI mode</dt>
+                <dd data-testid="agent-run-ui-mode">
+                  {describeUiMode(displayRun.uiMode)}
                 </dd>
               </div>
               <div>

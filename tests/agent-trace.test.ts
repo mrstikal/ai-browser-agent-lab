@@ -39,6 +39,7 @@ function makeRun(overrides: Partial<AgentRunRecord> = {}): AgentRunRecord {
     runId: RUN_ID,
     kind: "task",
     presetId: null,
+    uiMode: null,
     formBaseline: null,
     task: "Read the main heading.",
     modelId: "openrouter/openai/gpt-5.6-luna",
@@ -321,5 +322,29 @@ describe("trace run selection", () => {
     });
     expect(view.activeRun).toBeNull();
     expect(selectTraceRun(view)).toBeNull();
+  });
+
+  it("uses an explicitly selected history run and refuses a missing one", () => {
+    const latestTask = makeRun({
+      runId: "99999999-9999-4999-8999-999999999999",
+      startedAt: "2026-10-24T11:00:00.000Z",
+    });
+    const olderTask = makeRun({
+      runId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      startedAt: "2026-10-24T09:00:00.000Z",
+    });
+    const view = pickAgentDashboardView({
+      gate: makeGate(),
+      activeRunId: null,
+      runs: [latestTask, olderTask],
+    });
+    expect(view.history.map((run) => run.runId)).toEqual([
+      latestTask.runId,
+      olderTask.runId,
+    ]);
+    expect(selectTraceRun(view, olderTask.runId)?.runId).toBe(olderTask.runId);
+    expect(
+      selectTraceRun(view, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+    ).toBeNull();
   });
 });

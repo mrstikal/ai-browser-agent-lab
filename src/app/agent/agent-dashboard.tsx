@@ -8,17 +8,20 @@ import {
   type AgentDashboardView,
   type AgentStatusLike,
 } from "@/lib/agent-dashboard-view";
+import { mergeAgentRunSummary } from "@/lib/agent-history";
 import type { AgentRunLimits } from "@/lib/agent-ipc";
 import type { AgentTaskStartRequest } from "@/lib/agent-tasks";
 import {
   AGENT_STREAM_VERSION,
   AGENT_TRACE_VERSION,
+  EMPTY_AGENT_TRACE,
   mergeAgentTrace,
   type AgentStreamSnapshot,
   type AgentTracePayload,
   type AgentTraceState,
 } from "@/lib/agent-trace";
 import type { AgentRunRecord } from "@/server/agent-runs";
+import { HistoryPanel } from "./history-panel";
 import { TaskPanel } from "./task-panel";
 import { TracePanel, type AgentStreamConnection } from "./trace-panel";
 import { VerificationPanel } from "./verification-panel";
@@ -75,6 +78,7 @@ function applyReturnedRun(
         ? null
         : current.activeRunId,
     activeRun: isActive ? run : clearsActive ? null : current.activeRun,
+    history: mergeAgentRunSummary(current.history, run),
   };
   return run.kind === "task"
     ? { ...next, latestTask: run }
@@ -147,6 +151,7 @@ export function AgentDashboard({
   const [verificationConfirmed, setVerificationConfirmed] = useState(false);
   const [connection, setConnection] =
     useState<AgentStreamConnection>("connecting");
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [trace, setTrace] = useState<AgentTraceState>(initialTrace);
   const [traceError, setTraceError] = useState<string | null>(
     initialTraceError,
@@ -172,11 +177,44 @@ export function AgentDashboard({
   // otherwise the effect would silently restart with a fresh budget.
   const polling = runActive && !pollingStopped;
   const activeRunTimeoutMs = view.activeRun?.limits.timeoutMs ?? null;
+  // A run that falls out of the bounded history can no longer be selected;
+  // treat the selection as cleared without a state-setting effect.
+  const selectedHistoryRunId =
+    selectedRunId !== null &&
+    view.history.some((run) => run.runId === selectedRunId)
+      ? selectedRunId
+      : null;
 
   const applyView = useCallback((next: AgentDashboardView): void => {
     viewRef.current = next;
     setView(next);
   }, []);
+
+  /**
+   * Selecting a run immediately shows an empty trace for that run; the saved
+   * trace endpoint and the SSE stream then fill it. Selecting `null` follows
+   * the active/latest task again.
+   */
+  const selectHistoryRun = useCallback(
+    (runId: string | null, resetConnection = false): void => {
+      setSelectedRunId(runId);
+      setTraceError(null);
+      setStreamError(null);
+      // Selecting a saved run reopens the stream; following the latest trace
+      // also reopens it when a run was selected. Starting a run while already
+      // following the latest leaves the stream target unchanged.
+      if (runId !== null || resetConnection) {
+        connectionRef.current = "connecting";
+        setConnection("connecting");
+      }
+      setTrace(
+        runId === null
+          ? EMPTY_AGENT_TRACE
+          : { runId, events: [], truncated: false },
+      );
+    },
+    [],
+  );
 
   const clearPollState = useCallback((): void => {
     pollRunIdRef.current = null;
@@ -228,10 +266,15 @@ export function AgentDashboard({
   );
 
   // Live updates come from the same-origin SSE stream; the polling effect is
-  // only a fallback while the stream is connecting or reconnecting.
+  // only a fallback while the stream is connecting or reconnecting. Changing
+  // the selected run reopens the stream so its trace cursor starts cleanly.
   useEffect(() => {
     let disposed = false;
-    const source = new EventSource("/api/agent/stream");
+    const source = new EventSource(
+      selectedHistoryRunId === null
+        ? "/api/agent/stream"
+        : `/api/agent/stream?run=${encodeURIComponent(selectedHistoryRunId)}`,
+    );
 
     source.addEventListener("open", () => {
       if (disposed) return;
@@ -307,7 +350,47 @@ export function AgentDashboard({
       disposed = true;
       source.close();
     };
-  }, [applyView, finishSettledPoll]);
+  }, [applyView, finishSettledPoll, selectedHistoryRunId]);
+
+  // A selected historical run loads immediately even while the SSE stream is
+  // connecting. Merging without reset keeps any newer live events already
+  // received for the same run.
+  useEffect(() => {
+    if (selectedHistoryRunId === null) return;
+    const controller = new AbortController();
+    const requestedRunId = selectedHistoryRunId;
+    void (async () => {
+      try {
+        const response = await fetch(
+          `/api/agent/runs/${encodeURIComponent(requestedRunId)}/trace`,
+          { cache: "no-store", signal: controller.signal },
+        );
+        if (controller.signal.aborted) return;
+        if (!response.ok) {
+          setTraceError(
+            response.status === 404
+              ? "The selected run is no longer available in saved history."
+              : "The saved trace for the selected run is unreadable.",
+          );
+          return;
+        }
+        const payload = (await response.json()) as AgentTracePayload;
+        if (controller.signal.aborted) return;
+        if (payload.version !== AGENT_TRACE_VERSION) return;
+        setTraceError(null);
+        setTrace((current) =>
+          mergeAgentTrace(current, { ...payload, reset: false }),
+        );
+      } catch {
+        if (!controller.signal.aborted) {
+          setTraceError(
+            "The saved trace for the selected run could not be loaded.",
+          );
+        }
+      }
+    })();
+    return () => controller.abort();
+  }, [selectedHistoryRunId]);
 
   useEffect(() => {
     if (!polling || connection === "live") return;
@@ -428,6 +511,7 @@ export function AgentDashboard({
         });
         const failedRun = failure.run;
         if (failedRun !== null) {
+          selectHistoryRun(null);
           applyView(applyReturnedRun(viewRef.current, failedRun));
         }
         return;
@@ -443,6 +527,7 @@ export function AgentDashboard({
         });
         return;
       }
+      selectHistoryRun(null);
       applyView(applyReturnedRun(viewRef.current, run));
       setVerificationConfirmed(false);
       setFeedback({
@@ -493,6 +578,7 @@ export function AgentDashboard({
         });
         const failedRun = failure.run;
         if (failedRun !== null) {
+          selectHistoryRun(null);
           applyView(applyReturnedRun(viewRef.current, failedRun));
         }
         return false;
@@ -508,6 +594,7 @@ export function AgentDashboard({
         });
         return false;
       }
+      selectHistoryRun(null);
       applyView(applyReturnedRun(viewRef.current, run));
       setFeedback({
         scope: "task",
@@ -620,11 +707,17 @@ export function AgentDashboard({
         onRun={startTask}
         onCancel={(runId) => void cancelRun(runId)}
       />
+      <HistoryPanel
+        history={view.history}
+        selectedRunId={selectedHistoryRunId}
+        onSelect={(runId) => selectHistoryRun(runId, runId === null)}
+      />
       <TracePanel
         trace={trace}
         connection={connection}
         pollingStopped={pollingStopped}
         error={traceError}
+        selectedRunId={selectedHistoryRunId}
       />
     </div>
   );
