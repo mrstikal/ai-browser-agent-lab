@@ -3,10 +3,10 @@ import {
   AGENT_WORKER_MAX_TASK_CHARS,
   agentRunLimitsSchema,
 } from "@/lib/agent-ipc";
-import { agentCatalogTaskIdSchema } from "@/lib/agent-tasks";
+import { agentPresetTaskIdSchema } from "@/lib/agent-tasks";
 import { AgentCompatibilityError } from "@/server/agent-compatibility";
 import { startAgentRun } from "@/server/agent-manager";
-import { startCatalogTaskRun } from "@/server/agent-task-evaluator";
+import { startPresetTaskRun } from "@/server/agent-task-evaluator";
 import { AgentRunCorruptionError } from "@/server/agent-runs";
 import { CredentialError } from "@/server/credentials";
 import { ModelSettingsCorruptionError } from "@/server/model-settings";
@@ -18,14 +18,14 @@ export const runtime = "nodejs";
 
 const limitsSchema = agentRunLimitsSchema.partial().optional();
 
-/** Exactly one of `task` (custom) or `presetId` (catalog Task 1-3). */
+/** Exactly one of `task` (custom) or `presetId` (preset Tasks 1-5). */
 const startSchema = z.union([
   z.strictObject({
     task: z.string().trim().min(1).max(AGENT_WORKER_MAX_TASK_CHARS),
     limits: limitsSchema,
   }),
   z.strictObject({
-    presetId: agentCatalogTaskIdSchema,
+    presetId: agentPresetTaskIdSchema,
     limits: limitsSchema,
   }),
 ]);
@@ -50,7 +50,7 @@ export async function POST(request: Request) {
   try {
     result =
       "presetId" in guarded.data
-        ? await startCatalogTaskRun({
+        ? await startPresetTaskRun({
             presetId: guarded.data.presetId,
             limits: guarded.data.limits,
           })

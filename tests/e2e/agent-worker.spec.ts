@@ -350,6 +350,44 @@ test("preset catalog task passes with observed UI evidence", async ({
   );
 });
 
+test("form preset passes the business evaluator and persists the record", async ({
+  page,
+  baseURL,
+}) => {
+  if (!baseURL) throw new Error("The E2E base URL is missing.");
+  const dataDir = process.env.DATA_DIR;
+  if (!dataDir) throw new Error("The E2E DATA_DIR is missing.");
+  await seedKeyFile(dataDir);
+  await writeCompatibilityStamp(dataDir, baseURL);
+
+  await page.goto("/agent");
+  await page
+    .getByTestId("agent-preset-select")
+    .selectOption("form-support-request");
+  await expect(page.getByTestId("agent-preset-instruction")).toContainText(
+    "Using the support form, submit name Alex Demo",
+  );
+  await page.getByTestId("agent-run-task").click();
+
+  await expect(page.getByTestId("agent-run-execution")).toHaveText(
+    "Execution completed",
+    { timeout: 30_000 },
+  );
+  await expect(page.getByTestId("agent-run-task-result")).toContainText(
+    "Task passed",
+  );
+  await expect(page.getByTestId("agent-run-preset")).toContainText("Task 4");
+
+  const outputText = await page.getByTestId("agent-run-output").textContent();
+  const output = JSON.parse(outputText ?? "{}") as { requestId?: string };
+  expect(output.requestId).toMatch(
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+  );
+
+  await page.goto("/submissions");
+  await expect(page.getByText(output.requestId ?? "")).toBeVisible();
+});
+
 test("a mocked supervised run works beside the dev server", async ({
   request,
   baseURL,

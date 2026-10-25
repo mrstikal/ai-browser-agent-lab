@@ -603,6 +603,41 @@ describe("agent verification API route", () => {
     },
   );
 
+  it(
+    "starts a form preset and persists its baseline and evaluation",
+    { timeout: 45_000 },
+    async () => {
+      await seedKeyAndStamp();
+      const response = await runsRoute.POST(
+        makeRequest("/api/agent/runs", { presetId: "form-support-request" }),
+      );
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { run: AgentRunRecord };
+      expect(body.run).toMatchObject({
+        kind: "task",
+        presetId: "form-support-request",
+        formBaseline: { form: "support", submissionIds: [] },
+        status: "running",
+        evaluation: { status: "not_evaluated", reason: null },
+      });
+      expect(body.run.task).toContain(`${origin}/forms/support`);
+
+      const finished = await waitForRun(body.run.runId);
+      expect(finished).toMatchObject({
+        status: "completed",
+        stopReason: "completed",
+        presetId: "form-support-request",
+        evaluation: { status: "passed" },
+      });
+      const output = JSON.parse(finished.outputText ?? "{}") as {
+        requestId?: string;
+      };
+      expect(output.requestId).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      );
+    },
+  );
+
   it("refuses a start body with both a task and a preset", async () => {
     const response = await runsRoute.POST(
       makeRequest("/api/agent/runs", {

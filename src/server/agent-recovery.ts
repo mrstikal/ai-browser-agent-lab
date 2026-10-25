@@ -15,7 +15,7 @@ import {
   type AgentRunLifecycle,
   type AgentRunRecord,
 } from "./agent-runs";
-import { evaluateCatalogTaskRun } from "./agent-task-evaluation";
+import { evaluatePresetTaskRun } from "./agent-preset-evaluation";
 import { acquireLock, LockError, LockHeldError, readLockMetadata } from "./lock";
 import { AGENT_RUN_LOCK_KIND, PAID_JOB_LOCK_SEGMENTS } from "./paid-lock";
 import type { ProcOptions } from "./process-identity";
@@ -314,7 +314,7 @@ export async function recoverInterruptedAgentState(
       updated.presetId !== null &&
       updated.evaluation.status === "not_evaluated"
     ) {
-      updated.evaluation = evaluateCatalogTaskRun(updated);
+      updated.evaluation = await evaluatePresetTaskRun(updated, storage);
     }
     await saveAgentRun(storage, updated);
     runs.push(toReport(run, termination, lock, message));
@@ -363,7 +363,7 @@ export async function recoverInterruptedAgentState(
         updated.presetId !== null &&
         updated.evaluation.status === "not_evaluated"
       ) {
-        updated.evaluation = evaluateCatalogTaskRun(updated);
+        updated.evaluation = await evaluatePresetTaskRun(updated, storage);
       }
       await saveAgentRun(storage, updated);
     }

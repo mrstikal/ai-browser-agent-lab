@@ -4,11 +4,11 @@ import { type FormEvent, useState } from "react";
 import type { AgentDashboardView } from "@/lib/agent-dashboard-view";
 import type { AgentRunLimits } from "@/lib/agent-ipc";
 import {
-  AGENT_CATALOG_TASK_PRESETS,
-  buildCatalogTaskInstruction,
-  getAgentCatalogTaskPreset,
-  isAgentCatalogTaskId,
-  type AgentCatalogTaskId,
+  AGENT_TASK_PRESETS,
+  buildPresetTaskInstruction,
+  getAgentTaskPreset,
+  isAgentPresetTaskId,
+  type AgentPresetTaskId,
   type AgentTaskStartRequest,
 } from "@/lib/agent-tasks";
 import {
@@ -60,16 +60,16 @@ export function TaskPanel({
 }: TaskPanelProps) {
   const [task, setTask] = useState("");
   const [selectedPresetId, setSelectedPresetId] = useState<
-    AgentCatalogTaskId | "custom"
+    AgentPresetTaskId | "custom"
   >("custom");
   const { gate, activeRun, latestTask } = view;
 
   const preset =
     selectedPresetId === "custom"
       ? null
-      : getAgentCatalogTaskPreset(selectedPresetId);
+      : getAgentTaskPreset(selectedPresetId);
   const presetInstruction =
-    preset === null ? null : buildCatalogTaskInstruction(gate.origin, preset.id);
+    preset === null ? null : buildPresetTaskInstruction(gate.origin, preset.id);
   const trimmed = task.trim();
   const whitespaceOnly = task.length > 0 && trimmed.length === 0;
   const valid =
@@ -147,21 +147,22 @@ export function TaskPanel({
               onChange={(event) => {
                 const value = event.target.value;
                 setSelectedPresetId(
-                  isAgentCatalogTaskId(value) ? value : "custom",
+                  isAgentPresetTaskId(value) ? value : "custom",
                 );
               }}
               className="w-full rounded border border-slate-300 p-2 text-sm disabled:bg-slate-100"
             >
               <option value="custom">Custom task</option>
-              {AGENT_CATALOG_TASK_PRESETS.map((candidate) => (
+              {AGENT_TASK_PRESETS.map((candidate) => (
                 <option key={candidate.id} value={candidate.id}>
                   {candidate.label}
                 </option>
               ))}
             </select>
             <p className="text-xs text-slate-500">
-              Predefined tasks use a neutral JSON answer shape. Expected values
-              are checked on the server and are never sent to the model.
+              Catalog expected values are checked on the server and never sent
+              to the model. Form tasks must state the prescribed submission
+              values in the instruction.
             </p>
           </div>
 
@@ -343,7 +344,7 @@ export function TaskPanel({
                 <dd data-testid="agent-run-preset">
                   {displayRun.presetId === null
                     ? "Custom task"
-                    : getAgentCatalogTaskPreset(displayRun.presetId).label}
+                    : getAgentTaskPreset(displayRun.presetId).label}
                 </dd>
               </div>
               <div>

@@ -40,7 +40,10 @@ import {
   saveAgentRun,
   type AgentRunRecord,
 } from "../src/server/agent-runs";
-import { startCatalogTaskRun } from "../src/server/agent-task-evaluator";
+import {
+  startCatalogTaskRun,
+  startPresetTaskRun,
+} from "../src/server/agent-task-evaluator";
 import {
   deleteOpenRouterKey,
   resetCredentialHolderForTests,
@@ -48,6 +51,11 @@ import {
 } from "../src/server/credentials";
 import { acquireLock, LockHeldError, readLockMetadata } from "../src/server/lock";
 import { DEFAULT_BROWSER_MODEL_ID } from "../src/server/model-settings";
+import { listInquirySubmissionIds } from "../src/server/inquiry-form";
+import {
+  listSupportSubmissionIds,
+  saveSupportSubmission,
+} from "../src/server/support-form";
 import {
   AGENT_RUN_LOCK_KIND,
   PAID_JOB_LOCK_KIND,
@@ -169,6 +177,25 @@ async function seedStamp(
     verifiedAt: new Date().toISOString(),
     vision: "unverified",
   });
+}
+
+async function seedSupportSubmission(
+  context: TestContext,
+  requestId: string,
+  overrides: Record<string, unknown> = {},
+): Promise<string> {
+  const saved = await saveSupportSubmission(context.storage, {
+    requestId,
+    fullName: "Alex Demo",
+    email: "alex@example.com",
+    subject: "Payment confirmation issue",
+    priority: "High",
+    description:
+      "I did not receive a confirmation after the simulated payment.",
+    confirmLocalTest: true,
+    ...overrides,
+  });
+  return saved.id;
 }
 
 async function waitForTerminal(
@@ -696,6 +723,7 @@ describe("agent supervisor", () => {
         runId: randomUUID(),
         kind: "verification",
         presetId: null,
+        formBaseline: null,
         task: "Older verification run.",
         modelId: DEFAULT_BROWSER_MODEL_ID,
         origin: context.origin,
@@ -1695,6 +1723,280 @@ describe("agent supervisor", () => {
       expect(finished?.evaluation.reason).toContain(
         "did not match the required JSON shape",
       );
+    },
+  );
+
+  it(
+    "persists the form baseline before launch and passes one new support record",
+    { timeout: 30_000 },
+    async () => {
+      const context = await makeContext("success");
+      await seedKey(context);
+      await seedStamp(context);
+      const oldId = await seedSupportSubmission(
+        context,
+        "66666666-6666-4666-8666-666666666666",
+      );
+
+      const started = await startPresetTaskRun({
+        presetId: "form-support-request",
+        env: context.env,
+        storage: context.storage,
+      });
+      expect(started.status).toBe("started");
+      if (started.status !== "started") return;
+      expect(started.run).toMatchObject({
+        kind: "task",
+        presetId: "form-support-request",
+        formBaseline: { form: "support", submissionIds: [oldId] },
+        status: "running",
+        evaluation: { status: "not_evaluated", reason: null },
+      });
+      expect(started.run.task).toContain(`${context.origin}/forms/support`);
+      expect(started.run.task).toContain(
+        "Using the support form, submit name Alex Demo",
+      );
+      const persisted = await loadAgentRun(
+        context.storage,
+        started.run.runId,
+      );
+      expect(persisted?.formBaseline).toEqual({
+        form: "support",
+        submissionIds: [oldId],
+      });
+      const status = await loadAgentStatus({
+        storage: context.storage,
+        env: context.env,
+      });
+      expect(
+        status.runs.find((run) => run.runId === started.run.runId)
+          ?.formBaseline,
+      ).toBeNull();
+
+      await waitForTerminal(context.storage, started.run.runId);
+      await waitForIdle(context.storage);
+      const finished = await loadAgentRun(
+        context.storage,
+        started.run.runId,
+      );
+      expect(finished).toMatchObject({
+        status: "completed",
+        stopReason: "completed",
+        presetId: "form-support-request",
+        formBaseline: { form: "support", submissionIds: [oldId] },
+        evaluation: { status: "passed" },
+      });
+      const ids = await listSupportSubmissionIds(context.storage);
+      expect(ids).toContain(oldId);
+      expect(ids).toHaveLength(2);
+      const output = JSON.parse(finished?.outputText ?? "{}") as {
+        requestId?: string;
+      };
+      expect(output.requestId).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      );
+      expect(ids).toContain(output.requestId);
+    },
+  );
+
+  it(
+    "fails a form task when the answer points at a baseline record",
+    { timeout: 30_000 },
+    async () => {
+      const context = await makeContext("form-old-id");
+      await seedKey(context);
+      await seedStamp(context);
+      const oldId = await seedSupportSubmission(
+        context,
+        "66666666-6666-4666-8666-666666666666",
+      );
+
+      const started = await startPresetTaskRun({
+        presetId: "form-support-request",
+        env: context.env,
+        storage: context.storage,
+      });
+      expect(started.status).toBe("started");
+      if (started.status !== "started") return;
+
+      await waitForTerminal(context.storage, started.run.runId);
+      await waitForIdle(context.storage);
+      const finished = await loadAgentRun(
+        context.storage,
+        started.run.runId,
+      );
+      expect(finished).toMatchObject({
+        evaluation: { status: "failed" },
+      });
+      expect(finished?.evaluation.reason).toContain(
+        "exactly one new support submission",
+      );
+      expect(await listSupportSubmissionIds(context.storage)).toEqual([oldId]);
+    },
+  );
+
+  it(
+    "fails a duplicate form submit",
+    { timeout: 30_000 },
+    async () => {
+      const context = await makeContext("form-duplicate");
+      await seedKey(context);
+      await seedStamp(context);
+
+      const started = await startPresetTaskRun({
+        presetId: "form-support-request",
+        env: context.env,
+        storage: context.storage,
+      });
+      expect(started.status).toBe("started");
+      if (started.status !== "started") return;
+
+      await waitForTerminal(context.storage, started.run.runId);
+      await waitForIdle(context.storage);
+      const finished = await loadAgentRun(
+        context.storage,
+        started.run.runId,
+      );
+      expect(finished).toMatchObject({
+        evaluation: { status: "failed" },
+      });
+      expect(finished?.evaluation.reason).toContain("found 2");
+      expect(await listSupportSubmissionIds(context.storage)).toHaveLength(2);
+    },
+  );
+
+  it(
+    "fails a form task with an incorrect field",
+    { timeout: 30_000 },
+    async () => {
+      const context = await makeContext("form-incorrect-field");
+      await seedKey(context);
+      await seedStamp(context);
+
+      const started = await startPresetTaskRun({
+        presetId: "form-support-request",
+        env: context.env,
+        storage: context.storage,
+      });
+      expect(started.status).toBe("started");
+      if (started.status !== "started") return;
+
+      await waitForTerminal(context.storage, started.run.runId);
+      await waitForIdle(context.storage);
+      const finished = await loadAgentRun(
+        context.storage,
+        started.run.runId,
+      );
+      expect(finished).toMatchObject({
+        evaluation: { status: "failed" },
+      });
+      expect(finished?.evaluation.reason).toContain(
+        "Expected support priority",
+      );
+    },
+  );
+
+  it(
+    "fails a form task when the returned ID does not identify the new record",
+    { timeout: 30_000 },
+    async () => {
+      const context = await makeContext("form-wrong-id");
+      await seedKey(context);
+      await seedStamp(context);
+
+      const started = await startPresetTaskRun({
+        presetId: "form-support-request",
+        env: context.env,
+        storage: context.storage,
+      });
+      expect(started.status).toBe("started");
+      if (started.status !== "started") return;
+
+      await waitForTerminal(context.storage, started.run.runId);
+      await waitForIdle(context.storage);
+      const finished = await loadAgentRun(
+        context.storage,
+        started.run.runId,
+      );
+      expect(finished).toMatchObject({
+        evaluation: { status: "failed" },
+      });
+      expect(finished?.evaluation.reason).toContain("does not identify");
+      expect(await listSupportSubmissionIds(context.storage)).toHaveLength(1);
+    },
+  );
+
+  it(
+    "fails a form task when no new record exists",
+    { timeout: 30_000 },
+    async () => {
+      const context = await makeContext("form-no-record");
+      await seedKey(context);
+      await seedStamp(context);
+
+      const started = await startPresetTaskRun({
+        presetId: "form-support-request",
+        env: context.env,
+        storage: context.storage,
+      });
+      expect(started.status).toBe("started");
+      if (started.status !== "started") return;
+
+      await waitForTerminal(context.storage, started.run.runId);
+      await waitForIdle(context.storage);
+      const finished = await loadAgentRun(
+        context.storage,
+        started.run.runId,
+      );
+      expect(finished).toMatchObject({
+        evaluation: { status: "failed" },
+      });
+      expect(finished?.evaluation.reason).toContain("found 0");
+      expect(await listSupportSubmissionIds(context.storage)).toEqual([]);
+    },
+  );
+
+  it(
+    "passes one new matching inquiry record through the supervisor",
+    { timeout: 30_000 },
+    async () => {
+      const context = await makeContext("success");
+      await seedKey(context);
+      await seedStamp(context);
+
+      const started = await startPresetTaskRun({
+        presetId: "form-product-inquiry",
+        env: context.env,
+        storage: context.storage,
+      });
+      expect(started.status).toBe("started");
+      if (started.status !== "started") return;
+      expect(started.run).toMatchObject({
+        presetId: "form-product-inquiry",
+        formBaseline: { form: "inquiry", submissionIds: [] },
+      });
+      expect(started.run.task).toContain(
+        "Find Clarity Webcam and use its inquiry form",
+      );
+
+      await waitForTerminal(context.storage, started.run.runId);
+      await waitForIdle(context.storage);
+      const finished = await loadAgentRun(
+        context.storage,
+        started.run.runId,
+      );
+      expect(finished).toMatchObject({
+        status: "completed",
+        stopReason: "completed",
+        presetId: "form-product-inquiry",
+        evaluation: { status: "passed" },
+      });
+      const ids = await listInquirySubmissionIds(context.storage);
+      expect(ids).toHaveLength(1);
+      const output = JSON.parse(finished?.outputText ?? "{}") as {
+        confirmationId?: string;
+      };
+      expect(ids).toContain(output.confirmationId);
     },
   );
 });

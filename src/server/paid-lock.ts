@@ -6,3 +6,4 @@
 export const PAID_JOB_LOCK_SEGMENTS = ["locks", "paid-job.lock"] as const;
 export const PAID_JOB_LOCK_KIND = "paid-job";
 export const AGENT_RUN_LOCK_KIND = "agent-run";
+export const SUBMISSIONS_RESET_LOCK_KIND = "submissions-reset";

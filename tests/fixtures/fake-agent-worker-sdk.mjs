@@ -1,5 +1,11 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 
 /**
@@ -47,6 +53,101 @@ function catalogAnswerFor(task) {
     };
   }
   return null;
+}
+
+function formTaskFor(task) {
+  if (typeof task !== "string") return null;
+  if (task.includes("Using the support form, submit name Alex Demo")) {
+    return "support";
+  }
+  if (task.includes("Find Clarity Webcam and use its inquiry form")) {
+    return "inquiry";
+  }
+  return null;
+}
+
+function submissionsDir(form) {
+  const dataDir = process.env.DATA_DIR;
+  return dataDir ? join(dataDir, "submissions", form) : null;
+}
+
+function existingSubmissionIds(form) {
+  const dir = submissionsDir(form);
+  if (!dir || !existsSync(dir)) return [];
+  return readdirSync(dir)
+    .filter((name) => name.endsWith(".json"))
+    .map((name) => name.slice(0, -".json".length))
+    .sort();
+}
+
+function writeSubmission(form, overrides = {}) {
+  const dir = submissionsDir(form);
+  const id = randomUUID();
+  if (!dir) return id;
+  const createdAt = new Date().toISOString();
+  const base =
+    form === "support"
+      ? {
+          version: 1,
+          id,
+          createdAt,
+          requestId: id,
+          fullName: "Alex Demo",
+          email: "alex@example.com",
+          subject: "Payment confirmation issue",
+          priority: "High",
+          description:
+            "I did not receive a confirmation after the simulated payment.",
+          confirmLocalTest: true,
+        }
+      : {
+          version: 1,
+          id,
+          createdAt,
+          requestId: id,
+          fullName: "Alex Demo",
+          email: "alex@example.com",
+          productId: "P22",
+          inquiryType: "Specifications",
+          message: "Does this webcam support 1080p video recording?",
+        };
+  const record = { ...base, ...overrides };
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, `${id}.json`),
+    `${JSON.stringify(record, null, 2)}\n`,
+  );
+  return id;
+}
+
+function formTaskAnswer(form) {
+  if (mode === "form-old-id") {
+    const id = existingSubmissionIds(form)[0] ?? randomUUID();
+    return form === "support" ? { requestId: id } : { confirmationId: id };
+  }
+  if (mode === "form-wrong-id") {
+    writeSubmission(form);
+    const id = randomUUID();
+    return form === "support" ? { requestId: id } : { confirmationId: id };
+  }
+  if (mode === "form-duplicate") {
+    const id = writeSubmission(form);
+    writeSubmission(form);
+    return form === "support" ? { requestId: id } : { confirmationId: id };
+  }
+  if (mode === "form-incorrect-field") {
+    const id =
+      form === "support"
+        ? writeSubmission("support", { priority: "Low" })
+        : writeSubmission("inquiry", { inquiryType: "Other" });
+    return form === "support" ? { requestId: id } : { confirmationId: id };
+  }
+  if (mode === "form-no-record") {
+    const id = randomUUID();
+    return form === "support" ? { requestId: id } : { confirmationId: id };
+  }
+  const id = writeSubmission(form);
+  return form === "support" ? { requestId: id } : { confirmationId: id };
 }
 
 function emitStandardEvents(options, task) {
@@ -326,6 +427,23 @@ const agent = {
         if (options.signal?.aborted) finish();
         else options.signal?.addEventListener("abort", finish, { once: true });
       });
+    }
+
+    const form = formTaskFor(task);
+    if (form) {
+      // Form tasks need live UI proof, which a mock cannot provide. Do not
+      // emit browser tool events here, so the dashboard reports UI unverified
+      // instead of claiming a mocked full pass.
+      const answer = formTaskAnswer(form);
+      return {
+        status: "completed",
+        output: answer,
+        text: JSON.stringify(answer),
+        steps: 3,
+        durationMs: 25,
+        usage,
+        workspace: "",
+      };
     }
 
     emitStandardEvents(options, task);

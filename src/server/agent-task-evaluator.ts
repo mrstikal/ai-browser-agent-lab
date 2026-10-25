@@ -1,4 +1,7 @@
-import type { AgentCatalogTaskId } from "../lib/agent-tasks";
+import type {
+  AgentCatalogTaskId,
+  AgentPresetTaskId,
+} from "../lib/agent-tasks";
 import {
   startAgentRun,
   type AgentStartResult,
@@ -10,15 +13,17 @@ import {
   saveAgentRun,
   type AgentRunRecord,
 } from "./agent-runs";
-import { evaluateCatalogTaskRun } from "./agent-task-evaluation";
+import { evaluatePresetTaskRun } from "./agent-preset-evaluation";
 import { createStorage, type Storage } from "./storage";
 
 export {
   catalogTaskExpectations,
   evaluateCatalogTaskRun,
 } from "./agent-task-evaluation";
+export { evaluateFormTaskRun } from "./agent-form-task-evaluation";
+export { evaluatePresetTaskRun } from "./agent-preset-evaluation";
 
-export interface CatalogTaskSettlerOptions {
+export interface PresetTaskSettlerOptions {
   readonly storage: Storage;
   readonly now?: (() => Date) | undefined;
 }
@@ -30,8 +35,8 @@ export interface CatalogTaskSettlerOptions {
  * that record (instead of the stale on-disk snapshot) still persists a
  * terminal run with its evaluation.
  */
-export function buildCatalogTaskSettler(
-  options: CatalogTaskSettlerOptions,
+export function buildPresetTaskSettler(
+  options: PresetTaskSettlerOptions,
 ): (record: AgentRunRecord) => Promise<void> {
   return async (record) => {
     if (record.kind !== "task" || record.presetId === null) return;
@@ -44,7 +49,7 @@ export function buildCatalogTaskSettler(
       ? record
       : current;
     if (!isTerminalAgentRunStatus(terminal.status)) return;
-    const evaluation = evaluateCatalogTaskRun(terminal);
+    const evaluation = await evaluatePresetTaskRun(terminal, options.storage);
     await saveAgentRun(options.storage, {
       ...terminal,
       evaluation,
@@ -53,21 +58,24 @@ export function buildCatalogTaskSettler(
   };
 }
 
-export interface StartCatalogTaskRunOptions
+/** Backward-compatible name for catalog-only callers and tests. */
+export const buildCatalogTaskSettler = buildPresetTaskSettler;
+
+export interface StartPresetTaskRunOptions
   extends Omit<
     StartAgentRunOptions,
     "kind" | "task" | "presetId" | "onSettled"
   > {
-  readonly presetId: AgentCatalogTaskId;
+  readonly presetId: AgentPresetTaskId;
 }
 
 /**
- * Starts one predefined catalog task through the supervisor. The supervisor
- * builds the neutral instruction from the preset ID and the configured origin,
- * then this wrapper persists the independent business evaluation at settle.
+ * Starts one predefined task through the supervisor. The supervisor builds the
+ * neutral instruction from the preset ID and the configured origin; this
+ * wrapper persists the independent business evaluation at settle.
  */
-export async function startCatalogTaskRun(
-  options: StartCatalogTaskRunOptions,
+export async function startPresetTaskRun(
+  options: StartPresetTaskRunOptions,
 ): Promise<AgentStartResult> {
   const env = options.env ?? process.env;
   const storage = options.storage ?? createStorage(env);
@@ -77,6 +85,18 @@ export async function startCatalogTaskRun(
     storage,
     kind: "task",
     presetId: options.presetId,
-    onSettled: buildCatalogTaskSettler({ storage, now: options.now }),
+    onSettled: buildPresetTaskSettler({ storage, now: options.now }),
   });
+}
+
+export interface StartCatalogTaskRunOptions
+  extends Omit<StartPresetTaskRunOptions, "presetId"> {
+  readonly presetId: AgentCatalogTaskId;
+}
+
+/** Backward-compatible catalog-only entry point. */
+export async function startCatalogTaskRun(
+  options: StartCatalogTaskRunOptions,
+): Promise<AgentStartResult> {
+  return startPresetTaskRun(options);
 }

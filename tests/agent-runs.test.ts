@@ -136,12 +136,53 @@ describe("agent run records", () => {
       watchdogExpiredAt: null,
     };
     expect(parseAgentRunRecord(v2).presetId).toBeNull();
+    expect(parseAgentRunRecord(v2).formBaseline).toBeNull();
     expect(
       parseAgentRunRecord({ ...v2, presetId: "catalog-out-of-stock" }).presetId,
     ).toBe("catalog-out-of-stock");
+    expect(
+      parseAgentRunRecord({ ...v2, presetId: "form-support-request" }).presetId,
+    ).toBe("form-support-request");
+    expect(
+      parseAgentRunRecord({
+        ...v2,
+        formBaseline: {
+          form: "support",
+          submissionIds: ["66666666-6666-4666-8666-666666666666"],
+        },
+      }).formBaseline,
+    ).toEqual({
+      form: "support",
+      submissionIds: ["66666666-6666-4666-8666-666666666666"],
+    });
     expect(() =>
       parseAgentRunRecord({ ...v2, presetId: "catalog-unknown" }),
     ).toThrow(AgentRunCorruptionError);
+    expect(() =>
+      parseAgentRunRecord({
+        ...v2,
+        formBaseline: { form: "other", submissionIds: [] },
+      }),
+    ).toThrow(AgentRunCorruptionError);
+  });
+
+  it("accepts a legacy form baseline above the capture cap", () => {
+    const runId = randomUUID();
+    const submissionIds = Array.from(
+      { length: 1_001 },
+      (_, index) =>
+        `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+    );
+    const parsed = parseAgentRunRecord({
+      ...phase24Record(runId),
+      version: 2,
+      presetId: "form-support-request",
+      formBaseline: { form: "support", submissionIds },
+      cancelRequestedAt: null,
+      cancelReason: null,
+      watchdogExpiredAt: null,
+    });
+    expect(parsed.formBaseline?.submissionIds).toHaveLength(1_001);
   });
 
   it("rejects unknown versions, statuses, and malformed snapshots", () => {

@@ -21,9 +21,9 @@ import {
 } from "../lib/agent-ipc";
 import { HEALTH_MARKER } from "../lib/health";
 import {
-  agentCatalogTaskIdSchema,
-  buildCatalogTaskInstruction,
-  type AgentCatalogTaskId,
+  agentPresetTaskIdSchema,
+  buildPresetTaskInstruction,
+  type AgentPresetTaskId,
 } from "../lib/agent-tasks";
 import {
   AgentCompatibilityError,
@@ -44,10 +44,15 @@ import {
   isTerminalAgentRunStatus,
   listAgentRuns,
   saveAgentRun,
+  type AgentFormBaseline,
   type AgentRunCancelReason,
   type AgentRunRecord,
   type AgentRunWorker,
 } from "./agent-runs";
+import {
+  AgentFormBaselineLimitError,
+  captureFormBaseline,
+} from "./agent-form-baseline";
 import { resolveAppConfig, type AppConfig } from "./config";
 import { getKeyStatus, loadOpenRouterKey } from "./credentials";
 import { acquireLock, LockError, LockHeldError, type OwnerLock } from "./lock";
@@ -156,10 +161,10 @@ export interface StartAgentRunOptions {
   readonly kind: "verification" | "task";
   readonly task?: string | undefined;
   /**
-   * Preset catalog task ID. The supervisor builds the neutral instruction from
-   * this ID and the configured origin; `task` must be omitted.
+   * Preset task ID. The supervisor builds the neutral instruction from this ID
+   * and the configured origin; `task` must be omitted.
    */
-  readonly presetId?: AgentCatalogTaskId | undefined;
+  readonly presetId?: AgentPresetTaskId | undefined;
   readonly limits?: AgentRunLimitsInput | undefined;
   /** Heartbeat interval override (tests/tuning); bounded by the protocol. */
   readonly heartbeatMs?: number | undefined;
@@ -474,10 +479,15 @@ export async function loadAgentStatus(
   const unresolved = (report?.runs ?? []).filter(
     (entry) => entry.outcome === "skipped" || entry.outcome === "escaped",
   );
+  // The on-disk run record keeps the full baseline for evaluation; status and
+  // SSE summaries do not need the ID array and must stay bounded.
+  const runs = listed.runs.map((run) =>
+    run.formBaseline === null ? run : { ...run, formBaseline: null },
+  );
   return {
     activeRunId: getActiveAgentRunId(storage.root),
     gate,
-    runs: listed.runs,
+    runs,
     corruptRuns: listed.corrupt,
     recovery: report
       ? {
@@ -578,25 +588,25 @@ export async function startAgentRun(
     };
   }
 
-  let presetId: AgentCatalogTaskId | null = null;
+  let presetId: AgentPresetTaskId | null = null;
   if (options.presetId !== undefined) {
     if (options.kind !== "task") {
       return {
         status: "invalid-request",
-        message: "Only task runs can use a catalog preset.",
+        message: "Only task runs can use a task preset.",
       };
     }
     if (options.task !== undefined) {
       return {
         status: "invalid-request",
-        message: "Provide either a custom task or a catalog preset, not both.",
+        message: "Provide either a custom task or a task preset, not both.",
       };
     }
-    const parsedPreset = agentCatalogTaskIdSchema.safeParse(options.presetId);
+    const parsedPreset = agentPresetTaskIdSchema.safeParse(options.presetId);
     if (!parsedPreset.success) {
       return {
         status: "invalid-request",
-        message: "The selected catalog task is invalid.",
+        message: "The selected task preset is invalid.",
       };
     }
     presetId = parsedPreset.data;
@@ -650,11 +660,11 @@ export async function startAgentRun(
   if (options.kind === "verification") {
     task = buildVerificationTask(config.origin);
   } else if (presetId !== null) {
-    task = buildCatalogTaskInstruction(config.origin, presetId);
+    task = buildPresetTaskInstruction(config.origin, presetId);
     if (task.length > AGENT_WORKER_MAX_TASK_CHARS) {
       return {
         status: "invalid-request",
-        message: "The catalog task instruction exceeds the task length cap.",
+        message: "The task preset instruction exceeds the task length cap.",
       };
     }
   }
@@ -758,12 +768,28 @@ export async function startAgentRun(
     return { status: "key-required" };
   }
 
+  // The snapshot must reach the initial run record before the worker can
+  // submit a new form record. It is taken as late as practical, after the paid
+  // lock and gate, so only records created during the run appear as new; a
+  // submission before this point belongs to the baseline, not the agent.
+  let formBaseline: AgentFormBaseline | null = null;
+  try {
+    formBaseline = await captureFormBaseline(storage, presetId);
+  } catch (error) {
+    await refuse();
+    if (error instanceof AgentFormBaselineLimitError) {
+      return { status: "invalid-request", message: error.message };
+    }
+    throw error;
+  }
+
   const startedAt = now().toISOString();
   const record: AgentRunRecord = {
     version: AGENT_RUN_VERSION,
     runId,
     kind: options.kind,
     presetId,
+    formBaseline,
     task,
     modelId: gate.modelId,
     origin: config.origin,
@@ -1116,9 +1142,9 @@ export async function startAgentRun(
           isObservedBrowserToolEvent(message) &&
           record.uiEvidence !== "observed"
         ) {
+          // The terminal save persists this field. A nested persist here could
+          // land after the settle hook and overwrite its evaluation.
           record.uiEvidence = "observed";
-          record.updatedAt = now().toISOString();
-          persistRecord();
         }
       } catch {
         // Counts only advance for events that really reached disk; the first
@@ -1264,6 +1290,12 @@ export async function startAgentRun(
     );
     record.updatedAt = now().toISOString();
     persistRecord();
+    if (record.kind === "task") {
+      // The lock and holder stay for manual cleanup, but the task evaluation
+      // is still persisted once the terminal record reaches disk.
+      await writeChain.catch(() => undefined);
+      await runSettledHook();
+    }
     console.error(
       `[agent-supervisor] Agent run ${runId} left processes behind after exit; the paid lock stays held. ${note}`,
     );

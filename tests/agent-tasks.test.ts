@@ -5,9 +5,16 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   AGENT_CATALOG_TASK_IDS,
   AGENT_CATALOG_TASK_PRESETS,
+  AGENT_FORM_TASK_PRESETS,
+  AGENT_TASK_IDS,
   buildCatalogTaskInstruction,
+  buildPresetTaskInstruction,
+  getAgentFormTaskPreset,
   isAgentCatalogTaskId,
+  isAgentPresetTaskId,
   parseCatalogTaskAnswer,
+  parseFormTaskAnswer,
+  parsePresetTaskAnswer,
 } from "../src/lib/agent-tasks";
 import {
   buildCatalogTaskSettler,
@@ -36,6 +43,7 @@ function makeRecord(overrides: Partial<AgentRunRecord> = {}): AgentRunRecord {
     runId: RUN_ID,
     kind: "task",
     presetId: "catalog-cheapest-home",
+    formBaseline: null,
     task: "Preset task",
     modelId: "openrouter/openai/gpt-5.6-luna",
     origin: "http://127.0.0.1:3000",
@@ -129,6 +137,131 @@ describe("catalog task presets", () => {
       { name: "Mini Bluetooth Radio", priceUsd: 44 },
       { name: "Echo Mini Speaker", priceUsd: 59 },
     ]);
+  });
+});
+
+describe("form task presets", () => {
+  it("defines Tasks 4-5 and five total presets", () => {
+    expect(AGENT_TASK_IDS).toEqual([
+      "catalog-cheapest-home",
+      "catalog-out-of-stock",
+      "catalog-audio-under-70",
+      "form-support-request",
+      "form-product-inquiry",
+    ]);
+    expect(AGENT_FORM_TASK_PRESETS).toHaveLength(2);
+
+    const support = getAgentFormTaskPreset("form-support-request");
+    expect(support).toMatchObject({
+      form: "support",
+      startPath: "/forms/support",
+      expected: {
+        fullName: "Alex Demo",
+        email: "alex@example.com",
+        subject: "Payment confirmation issue",
+        priority: "High",
+        description:
+          "I did not receive a confirmation after the simulated payment.",
+        confirmLocalTest: true,
+      },
+    });
+    const supportInstruction = buildPresetTaskInstruction(
+      "http://127.0.0.1:3000",
+      support.id,
+    );
+    expect(supportInstruction).toContain(
+      "http://127.0.0.1:3000/forms/support",
+    );
+    expect(supportInstruction).toContain(
+      "Using the support form, submit name Alex Demo",
+    );
+    expect(supportInstruction).toContain(
+      '{"requestId":"<support request UUID>"}',
+    );
+
+    const inquiry = getAgentFormTaskPreset("form-product-inquiry");
+    expect(inquiry).toMatchObject({
+      form: "inquiry",
+      startPath: "/shop",
+      expected: {
+        productId: "P22",
+        productName: "Clarity Webcam",
+        inquiryType: "Specifications",
+        message: "Does this webcam support 1080p video recording?",
+      },
+    });
+    const inquiryInstruction = buildPresetTaskInstruction(
+      "http://127.0.0.1:3000",
+      inquiry.id,
+    );
+    expect(inquiryInstruction).toContain(
+      "Find Clarity Webcam and use its inquiry form",
+    );
+    expect(inquiryInstruction).toContain(
+      '{"confirmationId":"<inquiry confirmation UUID>"}',
+    );
+  });
+
+  it("recognizes all preset IDs", () => {
+    for (const id of AGENT_TASK_IDS) {
+      expect(isAgentPresetTaskId(id)).toBe(true);
+    }
+    expect(isAgentPresetTaskId("custom")).toBe(false);
+    expect(isAgentPresetTaskId("catalog-unknown")).toBe(false);
+  });
+});
+
+describe("strict form answers", () => {
+  const supportId = "33333333-3333-4333-8333-333333333333";
+  const inquiryId = "44444444-4444-4444-8444-444444444444";
+
+  it("accepts only the exact form answer shapes", () => {
+    expect(
+      parseFormTaskAnswer(
+        "form-support-request",
+        JSON.stringify({ requestId: supportId }),
+      ),
+    ).toMatchObject({ ok: true });
+    expect(
+      parseFormTaskAnswer(
+        "form-product-inquiry",
+        JSON.stringify({ confirmationId: inquiryId }),
+      ),
+    ).toMatchObject({ ok: true });
+    expect(
+      parsePresetTaskAnswer(
+        "form-support-request",
+        JSON.stringify({ requestId: supportId }),
+      ),
+    ).toMatchObject({ ok: true });
+    expect(
+      parseFormTaskAnswer(
+        "form-support-request",
+        JSON.stringify({ requestId: supportId, extra: true }),
+      ).ok,
+    ).toBe(false);
+    expect(
+      parseFormTaskAnswer(
+        "form-support-request",
+        JSON.stringify({ confirmationId: supportId }),
+      ).ok,
+    ).toBe(false);
+    expect(
+      parseFormTaskAnswer("form-support-request", "The request was accepted.")
+        .ok,
+    ).toBe(false);
+    expect(
+      parseFormTaskAnswer(
+        "form-support-request",
+        '{"requestId":"not-a-uuid"}',
+      ).ok,
+    ).toBe(false);
+    expect(
+      parseFormTaskAnswer(
+        "form-support-request",
+        `{"requestId":"${supportId}","requestId":"${inquiryId}"}`,
+      ).ok,
+    ).toBe(false);
   });
 });
 

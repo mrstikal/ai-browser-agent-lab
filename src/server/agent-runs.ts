@@ -10,8 +10,10 @@ import {
   type AgentWorkerEventMessage,
 } from "../lib/agent-ipc";
 import {
-  agentCatalogTaskIdSchema,
-  type AgentCatalogTaskId,
+  AGENT_FORM_BASELINE_SCHEMA_MAX_IDS,
+  agentFormTaskTypeSchema,
+  agentPresetTaskIdSchema,
+  type AgentPresetTaskId,
 } from "../lib/agent-tasks";
 import { modelIdSchema } from "../lib/schemas";
 import { Storage, StorageCorruptionError } from "./storage";
@@ -70,6 +72,20 @@ export const agentRunEvaluationSchema = z.strictObject({
 });
 export type AgentRunEvaluation = z.infer<typeof agentRunEvaluationSchema>;
 
+/**
+ * Snapshot of existing form-submission IDs taken before a form-task worker is
+ * launched. It is stored in the run record so the terminal evaluator can
+ * require exactly one new record and an old matching record can never satisfy
+ * a later run.
+ */
+export const agentFormBaselineSchema = z.strictObject({
+  form: agentFormTaskTypeSchema,
+  submissionIds: z
+    .array(z.string().min(1).max(200))
+    .max(AGENT_FORM_BASELINE_SCHEMA_MAX_IDS),
+});
+export type AgentFormBaseline = z.infer<typeof agentFormBaselineSchema>;
+
 export const agentRunWorkerSchema = z.strictObject({
   pid: z.number().int().positive(),
   groupId: z.number().int().positive(),
@@ -90,8 +106,10 @@ export const agentRunRecordSchema = z
     ]),
     runId: z.uuid(),
     kind: agentRunKindSchema,
-    /** Preset catalog task ID; null for custom tasks and verification runs. */
-    presetId: agentCatalogTaskIdSchema.nullable().optional(),
+    /** Preset task ID; null for custom tasks and verification runs. */
+    presetId: agentPresetTaskIdSchema.nullable().optional(),
+    /** Existing submission IDs captured before a form-task worker launch. */
+    formBaseline: agentFormBaselineSchema.nullable().optional(),
     task: z.string().min(1).max(AGENT_WORKER_MAX_TASK_CHARS),
     modelId: modelIdSchema,
     origin: z.string().min(1).max(300),
@@ -140,10 +158,16 @@ type RawAgentRunRecord = z.infer<typeof agentRunRecordSchema>;
 /** Normalized in-memory shape: version 2 with every field present. */
 export type AgentRunRecord = Omit<
   RawAgentRunRecord,
-  "version" | "presetId" | "cancelRequestedAt" | "cancelReason" | "watchdogExpiredAt"
+  | "version"
+  | "presetId"
+  | "formBaseline"
+  | "cancelRequestedAt"
+  | "cancelReason"
+  | "watchdogExpiredAt"
 > & {
   version: typeof AGENT_RUN_VERSION;
-  presetId: AgentCatalogTaskId | null;
+  presetId: AgentPresetTaskId | null;
+  formBaseline: AgentFormBaseline | null;
   cancelRequestedAt: string | null;
   cancelReason: AgentRunCancelReason | null;
   watchdogExpiredAt: string | null;
@@ -154,6 +178,7 @@ export function normalizeAgentRunRecord(raw: RawAgentRunRecord): AgentRunRecord 
     ...raw,
     version: AGENT_RUN_VERSION,
     presetId: raw.presetId ?? null,
+    formBaseline: raw.formBaseline ?? null,
     cancelRequestedAt: raw.cancelRequestedAt ?? null,
     cancelReason: raw.cancelReason ?? null,
     watchdogExpiredAt: raw.watchdogExpiredAt ?? null,

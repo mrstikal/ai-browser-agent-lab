@@ -1,4 +1,5 @@
 import {
+  isAgentCatalogTaskId,
   normalizeTaskName,
   parseCatalogTaskAnswer,
   type CatalogAudioAnswer,
@@ -194,7 +195,11 @@ function boundReason(reason: string): string {
 export function evaluateCatalogTaskRun(
   record: AgentRunRecord,
 ): AgentRunEvaluation {
-  if (record.kind !== "task" || record.presetId === null) {
+  if (
+    record.kind !== "task" ||
+    record.presetId === null ||
+    !isAgentCatalogTaskId(record.presetId)
+  ) {
     return { status: "not_evaluated", reason: null };
   }
   if (record.status !== "completed") {
