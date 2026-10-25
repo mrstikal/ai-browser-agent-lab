@@ -2,7 +2,10 @@
 
 import { type FormEvent, useState } from "react";
 import type { AgentDashboardView } from "@/lib/agent-dashboard-view";
-import type { AgentRunLimits } from "@/lib/agent-ipc";
+import {
+  AGENT_RUN_MIN_TIMEOUT_MS,
+  type AgentRunLimits,
+} from "@/lib/agent-ipc";
 import {
   AGENT_TASK_PRESETS,
   buildPresetTaskInstruction,
@@ -34,6 +37,53 @@ const TONE_CLASSES: Record<RunTone, string> = {
   danger: "border-red-300 bg-red-50 text-red-800",
 };
 
+interface LimitInputs {
+  readonly limits: AgentRunLimits | null;
+  readonly error: string | null;
+}
+
+/**
+ * The server re-validates every value; this mirror only keeps the Run button
+ * from submitting a request the Zod route schema would reject.
+ */
+function parseLimitInputs(
+  stepsText: string,
+  secondsText: string,
+  costText: string,
+  caps: TaskLimitsCaps,
+): LimitInputs {
+  const steps = Number(stepsText);
+  if (!Number.isInteger(steps) || steps < 1 || steps > caps.maxSteps) {
+    return {
+      limits: null,
+      error: `Steps must be a whole number from 1 to ${caps.maxSteps}.`,
+    };
+  }
+  const seconds = Number(secondsText);
+  const minSeconds = Math.ceil(AGENT_RUN_MIN_TIMEOUT_MS / 1_000);
+  if (
+    !Number.isInteger(seconds) ||
+    seconds < minSeconds ||
+    seconds * 1_000 > caps.maxTimeoutMs
+  ) {
+    return {
+      limits: null,
+      error: `Time must be a whole number of seconds from ${minSeconds} to ${Math.round(caps.maxTimeoutMs / 1_000)}.`,
+    };
+  }
+  const cost = Number(costText);
+  if (!Number.isFinite(cost) || cost <= 0 || cost > caps.maxCostUsd) {
+    return {
+      limits: null,
+      error: `Soft cost cap must be greater than $0.00 and at most ${formatUsd(caps.maxCostUsd)}.`,
+    };
+  }
+  return {
+    limits: { maxSteps: steps, timeoutMs: seconds * 1_000, maxCostUsd: cost },
+    error: null,
+  };
+}
+
 export interface TaskPanelProps {
   readonly view: AgentDashboardView;
   readonly defaults: AgentRunLimits;
@@ -63,6 +113,11 @@ export function TaskPanel({
   const [selectedPresetId, setSelectedPresetId] = useState<
     AgentPresetTaskId | "custom"
   >("custom");
+  const [stepsInput, setStepsInput] = useState(String(defaults.maxSteps));
+  const [secondsInput, setSecondsInput] = useState(
+    String(Math.round(defaults.timeoutMs / 1_000)),
+  );
+  const [costInput, setCostInput] = useState(String(defaults.maxCostUsd));
   const { gate, activeRun, latestTask } = view;
 
   const preset =
@@ -71,10 +126,13 @@ export function TaskPanel({
       : getAgentTaskPreset(selectedPresetId);
   const presetInstruction =
     preset === null ? null : buildPresetTaskInstruction(gate.origin, preset.id);
+  const limitInputs = parseLimitInputs(stepsInput, secondsInput, costInput, caps);
+  const limits = limitInputs.limits;
   const trimmed = task.trim();
   const whitespaceOnly = task.length > 0 && trimmed.length === 0;
   const valid =
-    preset !== null || (trimmed.length > 0 && trimmed.length <= maxTaskChars);
+    limits !== null &&
+    (preset !== null || (trimmed.length > 0 && trimmed.length <= maxTaskChars));
   const gateBlocker = describeGateBlocker(gate);
   const canRun = valid && gateBlocker === null && !runActive && busy === null;
 
@@ -88,8 +146,12 @@ export function TaskPanel({
 
   async function submit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
-    if (!canRun) return;
-    await onRun(preset === null ? { task: trimmed } : { presetId: preset.id });
+    if (!canRun || limits === null) return;
+    await onRun(
+      preset === null
+        ? { task: trimmed, limits }
+        : { presetId: preset.id, limits },
+    );
   }
 
   return (
@@ -109,10 +171,13 @@ export function TaskPanel({
             <span className="break-all">{gate.origin}</span>
           </p>
           <p data-testid="agent-limits-notice" className="text-sm text-slate-700">
-            Validated limits: {defaults.maxSteps} steps ·{" "}
-            {Math.round(defaults.timeoutMs / 1_000)} s ·{" "}
-            {formatUsd(defaults.maxCostUsd)} soft cost cap (server-enforced hard
-            caps: {caps.maxSteps} steps /{" "}
+            Validated limits: {limits?.maxSteps ?? stepsInput} steps ·{" "}
+            {limits === null
+              ? secondsInput
+              : Math.round(limits.timeoutMs / 1_000)}{" "}
+            s ·{" "}
+            {limits === null ? `${costInput} USD` : formatUsd(limits.maxCostUsd)}{" "}
+            soft cost cap (server-enforced hard caps: {caps.maxSteps} steps /{" "}
             {Math.round(caps.maxTimeoutMs / 60_000)} min /{" "}
             {formatUsd(caps.maxCostUsd)}).
           </p>
@@ -120,9 +185,75 @@ export function TaskPanel({
             The server validates the model and applies these limits. A run can
             overshoot the soft cost cap by one response. Execution status is
             never presented as task success. Screenshot/vision input stays
-            unverified until image content from a tool result is carried into a subsequent model turn.
+            unverified; this build has no request instrumentation that proves
+            image bytes reached the model.
           </p>
         </div>
+
+        <fieldset
+          disabled={runActive || busy !== null}
+          className="grid gap-3 rounded border border-slate-200 p-3 sm:grid-cols-3"
+        >
+          <legend className="px-1 text-sm font-medium text-slate-700">
+            Run limits
+          </legend>
+          <label htmlFor="agent-limit-steps" className="block text-sm">
+            <span className="font-medium text-slate-700">Max steps</span>
+            <input
+              id="agent-limit-steps"
+              data-testid="agent-limit-steps"
+              type="number"
+              inputMode="numeric"
+              min={1}
+              max={caps.maxSteps}
+              step={1}
+              value={stepsInput}
+              onChange={(event) => setStepsInput(event.target.value)}
+              className="mt-1 w-full rounded border border-slate-300 p-2 text-sm disabled:bg-slate-100"
+            />
+          </label>
+          <label htmlFor="agent-limit-seconds" className="block text-sm">
+            <span className="font-medium text-slate-700">Time (seconds)</span>
+            <input
+              id="agent-limit-seconds"
+              data-testid="agent-limit-seconds"
+              type="number"
+              inputMode="numeric"
+              min={Math.ceil(AGENT_RUN_MIN_TIMEOUT_MS / 1_000)}
+              max={Math.round(caps.maxTimeoutMs / 1_000)}
+              step={1}
+              value={secondsInput}
+              onChange={(event) => setSecondsInput(event.target.value)}
+              className="mt-1 w-full rounded border border-slate-300 p-2 text-sm disabled:bg-slate-100"
+            />
+          </label>
+          <label htmlFor="agent-limit-cost" className="block text-sm">
+            <span className="font-medium text-slate-700">
+              Soft cost cap (USD)
+            </span>
+            <input
+              id="agent-limit-cost"
+              data-testid="agent-limit-cost"
+              type="number"
+              inputMode="decimal"
+              min={0.01}
+              max={caps.maxCostUsd}
+              step={0.01}
+              value={costInput}
+              onChange={(event) => setCostInput(event.target.value)}
+              className="mt-1 w-full rounded border border-slate-300 p-2 text-sm disabled:bg-slate-100"
+            />
+          </label>
+        </fieldset>
+        {limitInputs.error ? (
+          <p
+            role="alert"
+            data-testid="agent-limit-error"
+            className="text-sm text-red-700"
+          >
+            {limitInputs.error}
+          </p>
+        ) : null}
 
         {gateBlocker ? (
           <div
@@ -366,7 +497,7 @@ export function TaskPanel({
               </div>
               <div>
                 <dt className="font-medium text-slate-500">Run limits</dt>
-                <dd>
+                <dd data-testid="agent-run-limits">
                   {displayRun.limits.maxSteps} steps ·{" "}
                   {Math.round(displayRun.limits.timeoutMs / 1_000)} s ·{" "}
                   {formatUsd(displayRun.limits.maxCostUsd)} soft cost cap
@@ -383,6 +514,14 @@ export function TaskPanel({
                 <dt className="font-medium text-slate-500">Vision evidence</dt>
                 <dd>
                   {displayRun.vision === "observed" ? "Observed" : "Unverified"}
+                  {displayRun.imageInputObserved &&
+                  displayRun.vision !== "observed" ? (
+                    <span className="mt-1 block text-xs text-slate-500">
+                      Image content appeared in a tool result, but the outbound
+                      model request was not instrumented, so image transport is
+                      not proven.
+                    </span>
+                  ) : null}
                 </dd>
               </div>
               <div>

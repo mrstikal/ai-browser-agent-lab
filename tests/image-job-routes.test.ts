@@ -335,9 +335,13 @@ describe("image job start route", () => {
       }),
     );
     expect(rejected.status).toBe(409);
-    expect(await rejected.json()).toMatchObject({
-      error: { code: "stale-model" },
-    });
+    const rejectedBody = (await rejected.json()) as {
+      error: { code: string; message: string };
+    };
+    expect(rejectedBody.error.code).toBe("stale-model");
+    expect(rejectedBody.error.message).toContain(
+      "Image model capabilities cannot be verified",
+    );
 
     catalogStatus = 500;
     const unavailable = await startRoute.POST(

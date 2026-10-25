@@ -30,6 +30,19 @@ export async function POST(request: Request) {
   if (!guarded.ok) return guarded.response;
 
   const storage = createStorage();
+  // Read the current settings before invalidating the compatibility stamp: if
+  // the settings are corrupt, the request aborts and the saved gate must stay
+  // intact because no model change took effect.
+  let settings;
+  try {
+    settings = await loadModelSettings(storage);
+  } catch {
+    return Response.json(
+      { error: { code: "settings-corrupt", message: "Model settings are unreadable." } },
+      { status: 500, headers: { "cache-control": "no-store" } },
+    );
+  }
+
   if (guarded.data.browser !== undefined) {
     try {
       await invalidateAgentCompatibility(storage);
@@ -45,16 +58,6 @@ export async function POST(request: Request) {
         { status: 500, headers: { "cache-control": "no-store" } },
       );
     }
-  }
-
-  let settings;
-  try {
-    settings = await loadModelSettings(storage);
-  } catch {
-    return Response.json(
-      { error: { code: "settings-corrupt", message: "Model settings are unreadable." } },
-      { status: 500, headers: { "cache-control": "no-store" } },
-    );
   }
 
   if (guarded.data.image !== undefined) {

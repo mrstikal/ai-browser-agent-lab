@@ -239,6 +239,29 @@ describe("sequential image batch", () => {
     ).toBe("completed");
   });
 
+  it("persists the cause of an unexpected batch failure", async () => {
+    const storage = await makeStorage();
+    const env = await startMock();
+    const jobId = await admitJob(storage, env, ["P01"]);
+
+    await startImageBatch({
+      storage,
+      jobId,
+      apiKey: "sk-or-v1-batch-key",
+      env,
+      retry: { baseDelayMs: 0 },
+    });
+
+    const job = await loadImageJob(storage);
+    expect(job?.status).toBe("failed");
+    expect(job?.error).toContain("baseDelayMs must be a positive integer");
+    expect(imagePostCount()).toBe(0);
+    expect(isPaidOperationActive()).toBe(false);
+    expect(
+      await readLockMetadata(storage.path(PAID_JOB_LOCK_SEGMENTS)),
+    ).toBeUndefined();
+  });
+
   it("stops after the in-flight request settles and sends no next request", async () => {
     const storage = await makeStorage();
     let notifyStarted: (() => void) | null = null;

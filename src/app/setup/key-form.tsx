@@ -31,11 +31,13 @@ export function KeyForm({ keyAvailable, source }: KeyFormProps) {
         setError(await readErrorMessage(response));
         return;
       }
-      const payload = (await response.json()) as { managementOnly?: boolean };
+      const payload = (await response.json()) as {
+        keyPermitsInference?: boolean;
+      };
       setKey("");
       setRemember(false);
       setMessage(
-        payload.managementOnly
+        payload.keyPermitsInference === false
           ? "Key validated, but OpenRouter reports a management-only key. It cannot run inference or image generation; replace it with an inference key."
           : "Key validated and stored. The key is never sent back to the browser.",
       );

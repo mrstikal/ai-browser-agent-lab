@@ -576,8 +576,18 @@ export function AgentDashboard({
         method: "POST",
         body:
           "presetId" in request
-            ? { presetId: request.presetId }
-            : { task: request.task },
+            ? {
+                presetId: request.presetId,
+                ...(request.limits === undefined
+                  ? {}
+                  : { limits: request.limits }),
+              }
+            : {
+                task: request.task,
+                ...(request.limits === undefined
+                  ? {}
+                  : { limits: request.limits }),
+              },
       });
       if (!response.ok) {
         const failure = await readMutationFailure(response);

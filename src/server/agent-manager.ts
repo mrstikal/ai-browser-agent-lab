@@ -1208,7 +1208,10 @@ export async function startAgentRun(
     }
     record.usage = message.usage;
     record.imageInputObserved = message.imageInputObserved;
-    record.vision = record.imageInputObserved ? "observed" : "unverified";
+    // The worker can only observe image content in a tool result plus a later
+    // turn boundary, not the outbound request payload. Do not promote that
+    // inference to "observed" vision evidence.
+    record.vision = "unverified";
     record.uiEvidence = message.pageActionObserved ? "observed" : "unverified";
     record.navigationObserved = message.navigationObserved;
     record.interactionObserved = message.interactionObserved === true;

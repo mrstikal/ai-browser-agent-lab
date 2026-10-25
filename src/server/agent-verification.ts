@@ -185,10 +185,11 @@ interface StampDecision {
 }
 
 /**
- * The stamp is the tuple `model + installed SDK + configured origin` with the
- * observed vision evidence. Every component is re-read at settle time; a
- * change during the run (the setup wizard can still change the browser model)
- * or an unreadable state fails closed instead of stamping an unproven tuple.
+ * The stamp is the tuple `model + installed SDK + configured origin`; vision
+ * stays unverified because this flow has no request instrumentation. Every
+ * component is re-read at settle time; a change during the run (the setup
+ * wizard can still change the browser model) or an unreadable state fails
+ * closed instead of stamping an unproven tuple.
  */
 async function stampCurrentTuple(
   options: VerificationSettlerOptions,
@@ -232,7 +233,11 @@ async function stampCurrentTuple(
     sdkVersion,
     origin: record.origin,
     verifiedAt: (options.now?.() ?? new Date()).toISOString(),
-    vision: record.imageInputObserved ? "observed" : "unverified",
+    // The verification job has no request instrumentation. Image content in a
+    // tool result and a later turn boundary do not prove the outbound payload,
+    // so the permanent stamp must stay unverified until a separately
+    // authorized visual-only smoke supplies transport evidence.
+    vision: "unverified",
   });
 
   // A browser-model change invalidates the stamp before saving settings; a

@@ -12,6 +12,11 @@ export interface AgentCompatibilityRecord {
   readonly origin: string;
   readonly verifiedAt: string;
   readonly vision: VisionEvidence;
+  /**
+   * Only a transport-instrumented visual smoke may set this. Without it, an
+   * `observed` value from an older build is normalized to `unverified` on read.
+   */
+  readonly visionTransport?: true;
 }
 
 export class AgentCompatibilityError extends StorageCorruptionError {
@@ -54,14 +59,29 @@ export function parseAgentCompatibility(value: unknown): AgentCompatibilityRecor
   if (record.vision !== "observed" && record.vision !== "unverified") {
     corrupted("vision must be observed or unverified.");
   }
-  return {
+  const transportProven = record.visionTransport === true;
+  if (
+    record.visionTransport !== undefined &&
+    record.visionTransport !== true
+  ) {
+    corrupted("visionTransport must be true when present.");
+  }
+  const parsed: AgentCompatibilityRecord = {
     version: AGENT_COMPATIBILITY_VERSION,
     modelId: record.modelId as string,
     sdkVersion: record.sdkVersion as string,
     origin: record.origin as string,
     verifiedAt: record.verifiedAt as string,
-    vision: record.vision,
+    // An `observed` label is only trusted when the writer recorded actual
+    // transport proof. Older inference-based stamps therefore downgrade.
+    vision:
+      record.vision === "observed" && !transportProven
+        ? "unverified"
+        : record.vision,
   };
+  return transportProven && parsed.vision === "observed"
+    ? { ...parsed, visionTransport: true }
+    : parsed;
 }
 
 export async function loadAgentCompatibility(

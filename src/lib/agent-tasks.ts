@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { AgentRunLimits } from "./agent-ipc";
 import { products } from "./products";
 import type {
   InquirySubmissionInput,
@@ -244,8 +245,11 @@ export function buildFormTaskInstruction(
 
 /** A dashboard request is either a custom task or one known preset. */
 export type AgentTaskStartRequest =
-  | { readonly presetId: AgentPresetTaskId }
-  | { readonly task: string };
+  | {
+      readonly presetId: AgentPresetTaskId;
+      readonly limits?: AgentRunLimits;
+    }
+  | { readonly task: string; readonly limits?: AgentRunLimits };
 
 const answerNameSchema = z.string().trim().min(1).max(200);
 const answerPriceSchema = z.number().finite().nonnegative().max(1_000_000);

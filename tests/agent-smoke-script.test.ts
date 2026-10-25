@@ -165,7 +165,7 @@ describe("agent model smoke live observations (mocked SDK)", () => {
     expect(run.stdout).not.toContain("sk-or-v1-remembered");
   });
 
-  it("labels vision observed only from mock image tool events", async () => {
+  it("keeps vision unverified when image tool events lack transport proof", async () => {
     const storage = await makeStorage();
     await storage.writeFile(["secrets", "openrouter-key"], "sk-or-v1-remembered");
     const origin = await startHealthServer();
@@ -175,10 +175,10 @@ describe("agent model smoke live observations (mocked SDK)", () => {
     );
     expect(run.result).toMatchObject({
       status: "Verified",
-      vision: "observed",
+      vision: "unverified",
       stampWritten: true,
     });
-    expect((await loadAgentCompatibility(storage))?.vision).toBe("observed");
+    expect((await loadAgentCompatibility(storage))?.vision).toBe("unverified");
   });
 
   it("does not label vision from an image result with no follow-up turn", async () => {

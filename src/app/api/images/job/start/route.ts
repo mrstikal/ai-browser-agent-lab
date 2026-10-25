@@ -147,11 +147,7 @@ export async function POST(request: Request) {
         "Another paid operation holds the shared lock. No new batch was admitted.",
       );
     case "quote-rejected":
-      return failure(
-        409,
-        result.code,
-        "The quote cannot be verified or is no longer current. No paid request was made.",
-      );
+      return failure(409, result.code, result.message);
     case "unavailable":
       return failure(
         503,

@@ -166,10 +166,21 @@ test("dashboard task controls start a run without claiming task success", async 
     "30 steps",
   );
   await expect(page.getByTestId("agent-limits-notice")).toContainText("$1.00");
+  await expect(page.getByTestId("agent-limit-steps")).toHaveValue("30");
+  await expect(page.getByTestId("agent-limit-seconds")).toHaveValue("180");
+  await expect(page.getByTestId("agent-limit-cost")).toHaveValue("1");
 
   const runButton = page.getByTestId("agent-run-task");
   await expect(runButton).toBeDisabled();
   await page.getByTestId("agent-task-input").fill("Read the main heading.");
+  await page.getByTestId("agent-limit-steps").fill("0");
+  await expect(page.getByTestId("agent-limit-error")).toContainText(
+    "Steps must be a whole number",
+  );
+  await expect(runButton).toBeDisabled();
+  await page.getByTestId("agent-limit-steps").fill("40");
+  await page.getByTestId("agent-limit-seconds").fill("200");
+  await page.getByTestId("agent-limit-cost").fill("2.00");
   await expect(runButton).toBeEnabled();
   await runButton.click();
 
@@ -180,6 +191,9 @@ test("dashboard task controls start a run without claiming task success", async 
   await expect(page.getByTestId("agent-run-stop-reason")).toHaveText(
     "The SDK completed the run.",
   );
+  await expect(page.getByTestId("agent-run-limits")).toContainText("40 steps");
+  await expect(page.getByTestId("agent-run-limits")).toContainText("200 s");
+  await expect(page.getByTestId("agent-run-limits")).toContainText("$2.00");
   await expect(page.getByTestId("agent-run-task-result")).toContainText(
     "Not evaluated",
   );

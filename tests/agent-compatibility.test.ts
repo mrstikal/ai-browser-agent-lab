@@ -49,6 +49,22 @@ describe("agent compatibility record", () => {
     );
   });
 
+  it("downgrades observed vision without transport proof", () => {
+    expect(
+      parseAgentCompatibility({ ...record, vision: "observed" }),
+    ).toMatchObject({ vision: "unverified" });
+    expect(
+      parseAgentCompatibility({
+        ...record,
+        vision: "observed",
+        visionTransport: true,
+      }),
+    ).toMatchObject({ vision: "observed", visionTransport: true });
+    expect(() =>
+      parseAgentCompatibility({ ...record, visionTransport: false }),
+    ).toThrow(AgentCompatibilityError);
+  });
+
   it("rejects malformed, unsupported, and invalid records", async () => {
     const storage = await makeStorage();
     await storage.writeFile(["agent-compatibility.json"], "{bad");

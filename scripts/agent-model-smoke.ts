@@ -115,8 +115,9 @@ function helpText(): string {
     `Limits per observation: maxSteps ${AGENT_SMOKE_LIMITS.maxSteps}, timeout ${AGENT_SMOKE_LIMITS.timeoutMs} ms, soft cost $${AGENT_SMOKE_LIMITS.maxCostUsd}.`,
     "The app stamp is written only after a successful Shop-heading observation",
     "with the app's current remembered key and matching model/SDK/origin.",
-    "Screenshots are labeled vision=observed only when SDK tool events actually",
-    "carry image content; a correct heading alone is never vision evidence.",
+    "Screenshots are labeled vision=unverified; image content in SDK tool",
+    "events does not prove the outbound request payload without transport",
+    "instrumentation.",
   ].join("\n");
 }
 
@@ -442,7 +443,6 @@ async function main(): Promise<number> {
   let workspace: string | undefined;
   let agent: BrowserUse | undefined;
   const observations: ObservationSummary[] = [];
-  let successfulObservationVision = false;
   let domainPolicy: SmokeResult["domainPolicy"] = "unverified";
   let stampWritten = false;
   let status: SmokeResult["status"] = "Partial - Unverified";
@@ -580,7 +580,6 @@ async function main(): Promise<number> {
       );
       observations.push(observation);
       if (observation.headingOk) {
-        successfulObservationVision = observation.imageContentSeen;
         reason = "The model read the Shop heading from the running app.";
         break;
       }
@@ -640,7 +639,7 @@ async function main(): Promise<number> {
         sdkVersion,
         origin,
         verifiedAt: new Date().toISOString(),
-        vision: successfulObservationVision ? "observed" : "unverified",
+        vision: "unverified",
       });
       stampWritten = true;
       status = "Verified";
@@ -688,7 +687,7 @@ async function main(): Promise<number> {
     status,
     reason,
     paidObservations,
-    vision: successfulObservationVision ? "observed" : "unverified",
+    vision: "unverified",
     domainPolicy,
     stampWritten,
     observations,

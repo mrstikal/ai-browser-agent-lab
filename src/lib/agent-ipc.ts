@@ -167,6 +167,7 @@ export const agentWorkerResultMessageSchema = z.strictObject({
   steps: z.number().int().nonnegative().nullable(),
   durationMs: z.number().int().nonnegative().nullable(),
   usage: agentWorkerUsageSchema,
+  /** Image content appeared before a later turn; not transport proof. */
   imageInputObserved: z.boolean(),
   pageActionObserved: z.boolean(),
   navigationObserved: z.boolean(),

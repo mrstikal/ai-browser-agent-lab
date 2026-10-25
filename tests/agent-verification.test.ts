@@ -566,7 +566,7 @@ describe("browser-based model verification", () => {
   );
 
   it(
-    "records observed vision evidence only from actual image content",
+    "keeps vision unverified when image content lacks transport proof",
     { timeout: 45_000 },
     async () => {
       const context = await makeContext("vision");
@@ -586,17 +586,17 @@ describe("browser-based model verification", () => {
       expect(finished).toMatchObject({
         evaluation: { status: "passed" },
         imageInputObserved: true,
-        vision: "observed",
+        vision: "unverified",
       });
       expect(await loadAgentCompatibility(context.storage)).toMatchObject({
-        vision: "observed",
+        vision: "unverified",
       });
       expect(
         await evaluateAgentGate({
           storage: context.storage,
           env: context.env,
         }),
-      ).toMatchObject({ verified: true, vision: "observed" });
+      ).toMatchObject({ verified: true, vision: "unverified" });
     },
   );
 

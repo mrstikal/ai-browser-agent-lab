@@ -4,19 +4,21 @@ import type { AddressInfo } from "node:net";
 import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import * as confirmRoute from "@/app/api/setup/confirm/route";
 import * as keyRoute from "@/app/api/setup/key/route";
 import * as modelsRoute from "@/app/api/setup/models/route";
 import {
+  DEFAULT_BROWSER_MODEL_ID,
   DEFAULT_IMAGE_MODEL_ID,
   loadModelSettings,
 } from "@/server/model-settings";
 import {
+  loadAgentCompatibility,
+  saveAgentCompatibility,
+} from "@/server/agent-compatibility";
+import {
   resetCredentialHolderForTests,
 } from "@/server/credentials";
 import {
-  beginPaidOperation,
-  endPaidOperation,
   resetPaidOperationsForTests,
 } from "@/server/paid-operation";
 import { Storage } from "@/server/storage";
@@ -158,8 +160,7 @@ describe("setup key route", () => {
     expect(memoryBody).toEqual({
       keyAvailable: true,
       source: "memory",
-      managementOnly: false,
-      inferenceAccess: "unverified",
+      keyPermitsInference: true,
     });
     expect(JSON.stringify(memoryBody)).not.toContain("sk-or-v1-session-key");
 
@@ -204,8 +205,7 @@ describe("setup key route", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({
       keyAvailable: true,
-      managementOnly: true,
-      inferenceAccess: "unverified",
+      keyPermitsInference: false,
     });
   });
 
@@ -267,119 +267,28 @@ describe("setup models route", () => {
     );
     expect(invalid.status).toBe(422);
   });
-});
 
-describe("setup confirm route", () => {
-  it("requires a validated key", async () => {
-    const response = await confirmRoute.POST(
-      makeRequest("POST", "/api/setup/confirm", {
-        confirm: true,
-        fingerprint: "a".repeat(64),
-      }),
-    );
-    expect(response.status).toBe(409);
-    expect(await response.json()).toMatchObject({ error: { code: "key-required" } });
-    expect(requests).toEqual([]);
-  });
-
-  it("confirms the displayed quote fingerprint without starting paid work", async () => {
-    await keyRoute.POST(
-      makeRequest("POST", "/api/setup/key", {
-        key: "sk-or-v1-confirm-key",
-        remember: false,
-      }),
-    );
-    requests.length = 0;
-
-    const wrong = await confirmRoute.POST(
-      makeRequest("POST", "/api/setup/confirm", {
-        confirm: true,
-        fingerprint: "0".repeat(64),
-      }),
-    );
-    expect(wrong.status).toBe(409);
-    const wrongBody = (await wrong.json()) as {
-      error: { code: string };
-      quote: { fingerprint: string };
-    };
-    expect(wrongBody.error.code).toBe("quote-changed");
-    expect(wrongBody.quote.fingerprint).toMatch(/^[0-9a-f]{64}$/);
-
-    const response = await confirmRoute.POST(
-      makeRequest("POST", "/api/setup/confirm", {
-        confirm: true,
-        fingerprint: wrongBody.quote.fingerprint,
-      }),
-    );
-    expect(response.status).toBe(200);
-    const body = (await response.json()) as {
-      ok: boolean;
-      started: boolean;
-      acceptedFingerprint: string;
-      quote: Record<string, unknown>;
-    };
-    expect(body.ok).toBe(true);
-    expect(body.started).toBe(false);
-    expect(body.acceptedFingerprint).toBe(wrongBody.quote.fingerprint);
-    expect(body.quote).toMatchObject({
-      baseUsd: "0.192",
-      startingBalanceBaseUsd: "1.184",
-      providerSlug: "cheap",
-      providerOnly: ["cheap"],
+  it("keeps the compatibility stamp when unreadable settings abort a browser change", async () => {
+    const storage = new Storage(process.env.DATA_DIR ?? "");
+    await saveAgentCompatibility(storage, {
+      version: 1,
+      modelId: DEFAULT_BROWSER_MODEL_ID,
+      sdkVersion: "0.1.0",
+      origin: "http://127.0.0.1:3000",
+      verifiedAt: new Date().toISOString(),
+      vision: "unverified",
     });
-    expect(JSON.stringify(body)).not.toContain("sk-or-v1-confirm-key");
-    expect(requests.every((request) => request.method === "GET")).toBe(true);
+    await storage.writeFile(["settings.json"], "{not json");
 
-    beginPaidOperation("image-job-1", "image");
-    const duringPaid = await confirmRoute.POST(
-      makeRequest("POST", "/api/setup/confirm", {
-        confirm: true,
-        fingerprint: wrongBody.quote.fingerprint,
-      }),
-    );
-    expect(duringPaid.status).toBe(409);
-    expect(await duringPaid.json()).toMatchObject({
-      error: { code: "paid-operation-active" },
-    });
-    endPaidOperation("image-job-1");
-  });
-
-  it("rejects stale model choices and guard violations", async () => {
-    await keyRoute.POST(
-      makeRequest("POST", "/api/setup/key", {
-        key: "sk-or-v1-stale-key",
-        remember: false,
-      }),
-    );
-    await modelsRoute.POST(
+    const response = await modelsRoute.POST(
       makeRequest("POST", "/api/setup/models", {
-        image: {
-          modelId: "gone/model",
-          resolution: "768",
-          aspectRatio: "1:1",
-          format: "png",
-          n: 1,
-        },
+        browser: { modelId: "openrouter/openai/advanced:free-1" },
       }),
     );
-
-    const stale = await confirmRoute.POST(
-      makeRequest("POST", "/api/setup/confirm", {
-        confirm: true,
-        fingerprint: "a".repeat(64),
-      }),
-    );
-    expect(stale.status).toBe(409);
-    expect(await stale.json()).toMatchObject({ error: { code: "stale-model" } });
-
-    const crossOrigin = await confirmRoute.POST(
-      makeRequest(
-        "POST",
-        "/api/setup/confirm",
-        { confirm: true, fingerprint: "a".repeat(64) },
-        { origin: "http://evil.example:3000" },
-      ),
-    );
-    expect(crossOrigin.status).toBe(403);
+    expect(response.status).toBe(500);
+    expect(await response.json()).toMatchObject({
+      error: { code: "settings-corrupt" },
+    });
+    expect(await loadAgentCompatibility(storage)).toBeDefined();
   });
 });

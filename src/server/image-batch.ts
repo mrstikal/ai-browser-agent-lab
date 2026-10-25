@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { redactText } from "../lib/agent-output";
 import { products } from "../lib/products";
 import type { ProductId } from "../lib/products";
 import {
@@ -123,6 +124,18 @@ function truncateError(message: string): string {
   return message.length > MAX_TARGET_ERROR_LENGTH
     ? message.slice(0, MAX_TARGET_ERROR_LENGTH)
     : message;
+}
+
+/**
+ * An unexpected exception outside a target iteration must stay visible. Redact
+ * the app key before persisting or logging the provider/storage detail.
+ */
+function unexpectedFailureDetail(error: unknown, apiKey: string): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  const redacted = redactText(raw, apiKey).trim();
+  return redacted.length > 0
+    ? truncateError(redacted)
+    : "No error detail was available.";
 }
 
 function resolveRetryPolicy(policy: ImageRetryPolicy | undefined): {
@@ -501,7 +514,11 @@ async function runImageBatch(options: StartImageBatchOptions): Promise<void> {
       return;
     }
     await finalizeCompleted(storage, jobId, now());
-  } catch {
+  } catch (error) {
+    const detail = unexpectedFailureDetail(error, apiKey);
+    const attemptMessage = `The attempt stopped unexpectedly: ${detail} Previously published images were kept.`;
+    const jobMessage = `The batch stopped unexpectedly: ${detail} Previously published images were kept.`;
+    console.error(`[image-batch] ${jobMessage}`);
     if (currentProductId !== null) {
       await updateImageJob(
         storage,
@@ -509,20 +526,21 @@ async function runImageBatch(options: StartImageBatchOptions): Promise<void> {
         (current) =>
           withTarget(current, currentProductId as ProductId, {
             status: "failed",
-            error: "The attempt stopped unexpectedly. Published images were kept.",
+            error: attemptMessage,
           }),
         now(),
-      ).catch(() => undefined);
+      ).catch((updateError) => {
+        console.error(
+          `[image-batch] Could not record the target failure: ${unexpectedFailureDetail(updateError, apiKey)}`,
+        );
+      });
     }
     try {
-      await finalize(
-        storage,
-        jobId,
-        "failed",
-        "The batch stopped unexpectedly. Previously published images were kept.",
-        now(),
+      await finalize(storage, jobId, "failed", jobMessage, now());
+    } catch (finalizeError) {
+      console.error(
+        `[image-batch] Could not persist the terminal failure: ${unexpectedFailureDetail(finalizeError, apiKey)}`,
       );
-    } catch {
       await releaseWithoutFinalStatus(storage, jobId);
     }
   }

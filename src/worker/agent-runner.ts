@@ -322,9 +322,10 @@ async function runWorker(): Promise<number> {
     const raw = event as { result?: unknown };
     const imageContent =
       normalized.kind === "tool_end" && containsImageContent(raw.result);
-    // A tool result containing an image is not model input yet. Only a
-    // subsequent model turn proves the image entered an outbound request;
-    // a run that stops at a budget boundary stays unverified.
+    // A tool result containing an image is not model input yet. A later turn
+    // start is only an inference that the SDK may have carried the image into
+    // the next request; there is no request instrumentation here that proves
+    // the outbound payload, so vision evidence stays unverified.
     if (normalized.kind === "turn_start" && state.pendingImageContent) {
       state.imageInputObserved = true;
     }

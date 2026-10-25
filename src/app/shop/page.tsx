@@ -13,6 +13,8 @@ import { loadDeliverableImages } from "@/server/image-delivery";
 import { createStorage } from "@/server/storage";
 import { loadUiModeView } from "@/server/ui-mode";
 
+export const dynamic = "force-dynamic";
+
 export const metadata: Metadata = {
   title: "Shop",
 };

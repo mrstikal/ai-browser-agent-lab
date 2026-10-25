@@ -72,8 +72,9 @@ export async function POST(request: Request) {
       {
         keyAvailable: status.keyAvailable,
         source: status.source,
-        managementOnly: validation.managementOnly,
-        inferenceAccess: validation.inferenceAccess,
+        // Derived locally from the non-billable validation; the provider's
+        // metadata fields and masked label are never forwarded.
+        keyPermitsInference: !validation.managementOnly,
       },
       { status: 200, headers: { "cache-control": "no-store" } },
     );

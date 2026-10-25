@@ -25,9 +25,10 @@ acceptance is deliberately separate:
 - The real 24-image provider flow and real local-browser task(s) through the app,
   including built `start`, require separate authorization and observation. In this
   checkout those live checks are **`Partial - Unverified`**, not core completion.
-- Browser-model vision support is **`Unverified`** unless image content from a tool result actually reached a
-  subsequent model turn. A correct text answer from the page heading does not prove that
-  screenshots reached the model.
+- Browser-model vision support is **`Unverified`**. Image content in a tool result
+  and a later model turn do not prove the outbound request payload, and this build has no
+  transport instrumentation; a separately authorized visual-only smoke would be required
+  to upgrade it. A correct text answer from the page heading is not vision evidence.
 - A completed agent process is not a passed business task. The dashboard shows
   execution status, the independent evaluation, and UI evidence separately.
 - Classic and Alternate layouts are available on the catalog, forms, and agent pages.
@@ -290,9 +291,9 @@ After a server restart, re-enter the key on `/setup`.
    fresh clone.
 
 The verification proves browser and model access for a DOM/text task. It does **not**
-prove screenshot/vision transport. The dashboard keeps vision `Unverified` until image content from a tool
-result actually reaches a subsequent model turn; it does not infer vision from token counts or a
-correct answer.
+prove screenshot/vision transport. The dashboard keeps vision `Unverified`; image content
+from a tool result plus a later turn is not transport proof, and the app does not infer
+vision from token counts or a correct answer.
 
 ### Run tasks and read results
 
@@ -539,7 +540,7 @@ Never point `OPENROUTER_BASE_URL` at a remote host, never use the test seams wit
 | Quote is blocked (`unknown-price`, `stale-model`, `unverified-capabilities`) | The selected model metadata or account entitlement could not be verified. Recheck the model ID/capabilities and quote. No paid request was made. |
 | Agent says verification is required | Use **Verify agent model** on `/agent` after entering a key. A key/model/SDK/origin change invalidates the old stamp. |
 | Agent gate reports a model/origin/SDK mismatch | The stamp belongs to a different tuple. Restore the matching setting or re-verify. A stamp does not transfer between data directories. |
-| Vision shows `Unverified` | Expected unless image content from a tool result actually reached a subsequent model turn. A text heading answer is not vision evidence. |
+| Vision shows `Unverified` | Expected in this build; no request instrumentation proves image bytes reached the model. Image content in a tool result is not transport proof, and a text heading answer is not vision evidence. |
 | Agent run is `hung`, or a browser process remains | Restart the app and let startup recovery verify/terminate the recorded group. Inspect `data/agent-recovery.json`, `data/locks/paid-job.lock`, and `data/browser-profiles/`. Do not delete locks before confirming processes are gone. |
 | Corrupt saved state | Inspect the named JSON file under `data/`; the app reports corruption rather than discarding data. Fix or restore the file, or perform a deliberate full reset. |
 | Layout shows Classic despite a saved choice, or the layout cannot change | Inspect `data/ui-settings.json`. A corrupt optional layout setting falls back to Classic on catalog/form/agent pages with a warning and blocks a new agent run as `state-unreadable`; fix or remove the file deliberately. A `409 paid-operation-active` response means an image batch, agent run, or another layout change is active. |
