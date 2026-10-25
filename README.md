@@ -1,48 +1,57 @@
 # AI Browser Agent Lab
 
-A standalone, single-user, local proof of concept. It combines:
+This local demo uses a small storefront as a controlled environment for an AI browser
+agent. It shows the difference between **generating content** (product images),
+**performing actions** (navigating pages and submitting forms in a local Chromium
+browser), and **checking results** (comparing the agent's answer and local records with
+fixed, server-side expectations). Run the same tasks in two layouts to explore how a
+change in presentation affects browser automation without changing the underlying data.
 
-- a fixed 24-product storefront with deterministic catalog rules;
-- AI-generated product images from OpenRouter;
-- two local test forms with persisted submissions;
-- a real local Chromium agent driven by `@browser_use/pi`;
-- deterministic, server-side evaluation of five preset browser tasks;
-- persisted run history, traces, and honest execution/usage labels;
-- optional Classic and Alternate layouts that rearrange the same catalog and form content.
+The 24 products, prices, stock levels, and catalog task answers are deterministic;
+form tasks are checked against new local records. OpenRouter generates images, not
+catalog facts. Form submissions and agent runs stay in a local, Git-ignored `data/`
+directory. This is a single-user experiment, not a real store: it has no
+checkout, payments, email delivery, authentication, cloud browser, or external database.
+Keep it bound to loopback, not a LAN or public interface.
 
-There is no checkout, payment, authentication, multi-user support, cloud browser, or
-external database. The application binds to a loopback origin only and stores its state
-under the Git-ignored `data/` directory.
+## How the demo fits together
 
-## Status and acceptance
+1. [Start the server](#quick-start-from-a-fresh-clone) without a key and browse the
+   storefront with image placeholders.
+2. [Optionally generate product images](#first-run-setup-and-image-generation) after
+   configuring OpenRouter, reviewing a live quote, and explicitly accepting the cost.
+   The product data does not change when images arrive.
+3. [Explore the catalog and test forms](#storefront-and-forms) to see the pages and local
+   records that the agent will later interact with.
+4. [Verify the browser model](#verify-the-browser-model-first) against a fixed local
+   heading task, then [run one of five presets](#run-tasks-and-read-results) to test
+   navigation, filtering, ordering, or form submission.
+5. [Switch layouts and compare runs](#mode-resilience-comparison). The dashboard
+   separates process completion, correct business results, and recorded page actions;
+   repeated runs are descriptive samples, not a statistical verdict.
 
-The deterministic implementation and local test suites are complete. Paid live
-acceptance is deliberately separate:
+Steps 2, 4, and any live repetition in step 5 use your OpenRouter account and may cost
+money. Starting the server, browsing the fixed catalog, and submitting the two local
+test forms do not require a key or a paid model call.
 
-- The deterministic image flow generates all 24 images against a loopback OpenRouter
-  mock, and the built `start` path is exercised with a fake agent SDK. Neither makes a
-  provider request.
-- The real 24-image provider flow and real local-browser task(s) through the app,
-  including built `start`, require separate authorization and observation. In this
-  checkout those live checks are **`Partial - Unverified`**, not core completion.
-- Browser-model vision support is **`Unverified`**. Image content in a tool result
-  and a later model turn do not prove the outbound request payload, and this build has no
-  transport instrumentation; a separately authorized visual-only smoke would be required
-  to upgrade it. A correct text answer from the page heading is not vision evidence.
-- A completed agent process is not a passed business task. The dashboard shows
-  execution status, the independent evaluation, and UI evidence separately.
-- Classic and Alternate layouts are available on the catalog, forms, and agent pages.
-  They change only arrangement; data, routes, labels, and task instructions stay the
-  same. Each new agent run records the mode at its start.
-- The optional mode resilience comparison on `/agent` reads stored runs and never
-  rewrites them. It reports full-pass counts by model, task, mode, and sample size; a
-  live repeat needs a fresh cost confirmation.
+## Technologies and why they matter
 
-The development checkout has a recorded authorized heading observation for the tuple
-`openrouter/openai/gpt-5.6-luna`, `@browser_use/pi` `0.1.0`, and
-`http://127.0.0.1:3000` (2026-10-24), with vision unverified. The stamp is stored per data
-directory in `data/agent-compatibility.json`; a fresh clone starts unverified and must run
-its own browser verification.
+- **Next.js App Router, React, TypeScript, and Tailwind CSS** serve the storefront,
+  setup wizard, forms, and agent dashboard from one typed application. The same product
+  data and guarded server routes support both layouts.
+- **OpenRouter** supplies image generation and the browser agent's model. Separate model
+  choices share one API-key/account boundary; the image flow shows a quote before paid
+  requests.
+- **`@browser_use/pi` and installed Chromium** let the agent act on actual local pages.
+  Browser navigation and form interaction can be examined separately from the model's
+  final text. The browser is local, not hosted.
+- **Zod and `sharp`** validate inputs/records and decode generated image bytes. Malformed
+  form data, settings, answers, or images are rejected before use.
+- **Local filesystem and Server-Sent Events (SSE)** store images, submissions, jobs,
+  runs, and traces without a database. Progress streams to the UI, with a GET fallback
+  if a stream disconnects; saved work survives refreshes.
+- **Vitest, Playwright, and a loopback OpenRouter mock** exercise logic and browser
+  workflows with disposable data, without a real API key or paid provider calls.
 
 ## Requirements
 
@@ -50,7 +59,7 @@ its own browser verification.
 
 - Node.js **22.19 or newer** is required. The tested default is `22.22.2` (`.nvmrc`).
 - `package.json` declares `engines.node >= 22.19`, `.npmrc` enables `engine-strict`, and
-  every application command runs `scripts/check-node.mjs` before startup.
+  the `dev`, `build`, `start`, and browser-test entry points check the runtime before use.
 - With nvm:
 
   ```bash
@@ -84,11 +93,16 @@ its own browser verification.
 
 - The app listens on `http://127.0.0.1:3000` by default. Do not expose it on a LAN
   interface; it has no authentication.
+- An [OpenRouter account and API key](https://openrouter.ai/keys) are needed only when
+  you choose to generate images or run the model-backed browser agent. Check your account
+  credit and set an account-side spending limit before paid actions.
 - Normal application traffic leaves the machine only for explicitly approved OpenRouter
   requests. Next.js telemetry is disabled.
 - npm with the committed lockfile is the supported package manager.
 
 ## Quick start from a fresh clone
+
+Replace `<repository-url>` with the clone URL you have access to:
 
 ```bash
 git clone <repository-url> ai-browser-agent-lab
@@ -99,9 +113,10 @@ npm ci
 npm run dev
 ```
 
-Open <http://127.0.0.1:3000>. No API key, `data/` directory, or provider account is needed
-to start the server. The catalog and forms remain browseable with image placeholders. A
-fresh visitor is redirected from `/` to `/setup`.
+Open <http://127.0.0.1:3000>. No API key, pre-existing `data/` directory, or provider
+account is needed to start the server. The catalog and forms are usable with image
+placeholders, even if you skip image generation. On a new data directory, `/` redirects
+to `/setup`; use the navigation to browse `/shop` at any time.
 
 The first server start creates the private `data/` tree and `data/.server.lock`. Confirm
 the local server is healthy:
@@ -120,15 +135,8 @@ npm run build
 npm run start
 ```
 
-Built `start` uses the same origin, storage, worker, and recovery behavior as `dev`. Build
-first; `npm run start` does not build for you. The deterministic built-path check is:
-
-```bash
-npm run smoke:built-worker
-```
-
-It requires a production build, starts `npm run start`, runs one fake-SDK worker, checks
-cleanup and key handling, and makes no provider request. It is POSIX-only (Linux/WSL).
+Built `start` uses the same origin, storage, worker, and recovery paths as `dev`. Build
+first; `npm run start` does not build for you.
 
 ### A different loopback port
 
@@ -143,32 +151,42 @@ URL. Use one origin consistently for the browser tab, agent runs, and tests.
 
 ## First-run setup and image generation
 
+The setup wizard turns the fixed catalog into an image-rich storefront. Image generation
+is optional and paid; neither product names nor catalog answers are generated by AI.
+This distinction makes the later browser tasks independently checkable. The agent can
+work with image placeholders too, once its browser model has been verified.
+
 1. Open `/setup`.
-2. Enter an OpenRouter API key. It is validated with a non-billable
-   `GET https://openrouter.ai/api/v1/key` request.
-   - **Remember API Key is off by default.** The key stays only in the local server
-     process. Refreshes reuse it, but a server restart requires re-entry.
-   - With Remember on, the key is stored as **plaintext** at
-     `data/secrets/openrouter-key` with mode `0600` where the filesystem supports it.
-     This is not encryption. WSL, network filesystems, and other mounts may not enforce
-     equivalent permissions.
-   - A management-only key can validate but cannot run inference or image generation.
-   - Key replacement or deletion invalidates the browser-model compatibility stamp before
-     the change. Both are refused while a paid operation is active.
-3. Choose the image model and browser model. The defaults are
+2. Enter an OpenRouter API key. The app checks it through a non-billable
+   `GET https://openrouter.ai/api/v1/key` request; validation alone does not prove
+   inference access. **Remember API Key is off by default**: the server keeps the key in
+   memory across page refreshes, but you must re-enter it after a restart. If enabled,
+   Remember stores plaintext at `data/secrets/openrouter-key` (mode `0600` where
+   supported), **not encrypted**. WSL, network filesystems, and other mounts may not
+   enforce equivalent permissions. A management-only key cannot run inference or
+   generate images. Key changes are refused during paid work and invalidate browser
+   verification.
+3. Choose separate image and browser models. The defaults are
    `black-forest-labs/flux-3-image-klein` for images and
-   `openrouter/openai/gpt-5.6-luna` for the browser agent. Image-model capabilities and
-   pricing are checked against live metadata during quoting. Browser model IDs are
-   format-checked when saved; actual account/model access is established only by the paid
-   browser verification run. A public catalog entry is not proof of account access.
-4. Review the current quote. It shows the target IDs, unit price, base estimate, the
+   `openrouter/openai/gpt-5.6-luna` for the browser agent. The image choice controls
+   visuals, not product facts; the browser choice controls the agent's reasoning.
+   Image-model capabilities and price are checked against live metadata when quoting.
+   A saved browser-model ID is only format-checked; actual access needs the paid browser
+   verification run.
+4. Review the current image quote. It shows the target count, unit price, base estimate, the
    worst case with up to two retries per image, and the indicative starting balance needed
-   to keep $1 available before **each** image request.
-5. Check the confirmation box and start the batch. Only missing images are targeted unless
-   you explicitly choose a regeneration/resume path.
-6. Watch progress on `/setup` over SSE, with a GET fallback if the stream is interrupted.
-   Each of the 24 successful IDs is counted once. Generated images are validated and
-   persisted; a refresh or restart does not regenerate valid images.
+   to keep $1 available before **each** image request. The quote is not an account-side
+   spending cap.
+5. Check the cost-confirmation box and start the batch. The server rechecks the quoted
+   selection and targets before it sends paid requests. The initial batch targets only
+   missing images; **Resume missing images** and **Retry failed images** require a new
+   quote and confirmation. Requests run sequentially, with up to two retries for
+   transient failures.
+6. Watch per-product progress and failures, plus the aggregate cost breakdown, on
+   `/setup`. SSE updates the page; a read-only GET fallback works if the stream
+   disconnects. Image bytes are decoded and validated before publication. The catalog
+   replaces placeholders with valid images; refreshing or restarting does not regenerate
+   them automatically.
 
 ### Costs
 
@@ -178,15 +196,13 @@ provide a provider invoice or a hard account-side spending cap.
 - The image quote is computed from the selected model's live endpoint metadata and an
   exact fixed-point USD price. Unknown or stale pricing blocks generation instead of
   showing `$0`.
-- Example only, from the 2026-10-23 metadata used during development:
-  `flux-3-image-klein` at 768 px and `1:1` was $0.008 per image. For 24 images that is
-  $0.192 for one attempt per image, $0.576 for the three-attempt worst case, and an
-  indicative starting balance of $1.184 (base) or $1.568 (worst case) because the image
-  API requires $1 available before each request. Recheck the displayed quote; it is
-  authoritative for your run.
+- Illustration, **not a current price**: at $0.008 per image, 24 images cost $0.192
+  for one attempt each or $0.576 if each needs three attempts. Indicative starting
+  balances are $1.184 and $1.568 respectively, because $1 must remain before each
+  request. Always use the quote displayed for your own model and targets.
 - The image API can return HTTP 402 when the available balance is below $1 before a
-  request, even if the projected batch costs less. Stop on 402 and add credit or choose a
-  verifiably priced model.
+  request, even if the projected batch costs less. Stop on 402, add credit, and obtain a
+  fresh quote before continuing; a cheaper model does not remove the $1 floor.
 - Agent verification uses fixed limits of 8 steps, 120 seconds, and a $0.25 soft cost
   limit. Task runs default to 30 steps, 180 seconds, and a $1.00 soft cost limit; the
   server accepts up to 200 steps, 30 minutes, and $100. The SDK checks the soft cost limit
@@ -210,9 +226,9 @@ provide a provider invoice or a hard account-side spending cap.
 - After a failed, interrupted, or stopped batch, `/setup` offers **Resume missing images**
   or **Retry failed images** where applicable. Valid images are reused; only the displayed
   targets are quoted and requested.
-- A completed batch requires every target to succeed or be deliberately reused and all 24
-  active files to validate. A failed regeneration can leave 24 older valid images while
-  its job remains failed.
+- A completed batch requires every targeted image to succeed and all 24 active files to
+  validate. After a failed batch, previously valid images may still be
+  available in the storefront; job status and available images are distinct.
 
 ### Restart recovery
 
@@ -231,38 +247,50 @@ On startup the server performs local-only recovery before serving:
 
 ## Storefront and forms
 
-- `/shop` renders exactly 24 fixed products, six per unfiltered page, with four pages.
-  Search, category, in-stock, and price sort are URL-based GET controls. Filters and
-  sorting apply before pagination.
-- Product attributes are fixed in source code. AI generates images only.
-- Product detail pages use exact slugs, return real 404s for unknown slugs, and preselect
-  the product on the inquiry form.
-- `/forms/support` requires full name, valid email, subject, priority, description, and a
-  checked local-test confirmation. It shows a review step before submission.
-- `/forms/inquiry` requires full name, valid email, a known product ID, inquiry type, and
-  message. Product detail pages preselect the product.
-- Both forms validate on the server with Zod, persist one UUID record under
-  `data/submissions/`, and show the confirmation ID. There is no email or payment
-  integration.
-- `/submissions` lists both form types. **Reset submissions** removes only support and
-  inquiry records; it never removes images, keys, settings, or agent history. It is
-  refused during an active agent run or another paid operation.
+1. **Browse `/shop`.** The catalog contains exactly 24 fixed products, six per
+   unfiltered page across four pages. Search, category, in-stock filtering, and price
+   sorting are URL-based GET controls; filtering and sorting happen before pagination.
+   This gives both a human and the agent repeatable facts to inspect. Product attributes
+   remain the same with or without generated images.
+2. **Open a product detail page.** Its description, USD price, and stock come from the
+   fixture. An unknown slug returns a real 404. The inquiry link carries the product ID
+   into the form, demonstrating how the agent can follow context between pages instead
+   of guessing a product.
+3. **Try the local forms.** `/forms/support` collects full name, valid email, subject,
+   priority and description. It validates an edit step, then shows a review step where
+   the local-test confirmation must be checked before submitting. `/forms/inquiry` has
+   no review step or confirmation checkbox; it collects full name, valid email, a known
+   product, inquiry type and message, with the product preselected from its detail page.
+   Both forms validate on the server and persist one UUID record under
+   `data/submissions/` for each new request ID. The forms generate request IDs in the
+   browser and reuse an ID when retrying the same submission, preventing duplicates.
+   Both display **Your request ID** after submission. These records let the
+   evaluator check what was actually submitted, not just what the agent claims it did.
+   No email is sent and no payment is taken.
+4. **Inspect `/submissions`.** Both form types appear here after submission. **Reset
+   submissions** clears only support and inquiry records, leaving images, keys, settings,
+   and agent history intact. The reset is refused during an active agent run or another
+   paid operation. You do not have to clear old submissions before a form preset: the
+   evaluator records up to 1,000 pre-run IDs for that form and checks for exactly one
+   new submission. If more records of that form already exist, its preset is refused
+   until you reset submissions.
 
 ### Classic and Alternate layouts
 
-The layout switcher is available on `/shop`, both form pages, and `/agent`. It is one
+The layout switcher is available on `/shop`, both form pages, and `/agent`. Use it to
+compare agent behavior when the same controls are presented differently. It is one
 global local setting, so the agent's browser sees the same arrangement as your browser.
 
-- **Classic**: catalog filters above a three-column card grid, and single-column form
-  fields.
+- **Classic**: catalog filters above a responsive card grid (one column on narrow
+  screens, two from `sm`, three from `lg`), and single-column form fields.
 - **Alternate**: catalog filters in a sidebar beside a two-column card grid, and
   two-column form fields with the long text area spanning both columns.
 
 Both modes render the same products, labels, field names, values, validation, URLs, and
 task instructions. The DOM order stays the same; only the visual arrangement changes. The
-setting is stored in `data/ui-settings.json` (mode and timestamp only) and defaults to
-Classic. It is not a query parameter or cookie, so it cannot silently change a catalog or
-form URL.
+setting is stored in `data/ui-settings.json` (version, mode, and timestamp, with no
+personal data) and defaults to Classic. It is not a query parameter or cookie, so it
+cannot silently change a catalog or form URL.
 
 The mode is captured from this setting at the start of each new agent run. A saved run
 keeps its original mode after you switch layouts. Changing the layout briefly reserves the
@@ -272,20 +300,29 @@ start therefore stays stable for the whole run.
 
 ## Browser agent
 
+The agent is a separate, model-backed process controlling an installed local Chromium
+browser. It visits the same app origin you do, but its output is not accepted on trust:
+the preset evaluator checks catalog facts or new local form records independently.
+
 ### Verify the browser model first
 
 The agent uses the same server-side key as setup. **Remember can stay off**: as long as
 the server process still holds the key, browser verification and agent runs can use it.
-After a server restart, re-enter the key on `/setup`.
+After a server restart, re-enter the key on `/setup`. Verification is a small paid
+smoke task to establish that this key, model, SDK, and local origin work together before
+you attempt longer browser tasks.
 
 1. Start the app at the configured origin and open `/agent`.
 2. Read the gate. Live tasks stay unavailable until the current key, browser model,
    installed SDK version, and app origin are verified.
 3. In **Verify agent model**, review the separate cost warning and check the confirmation
-   box. The fixed job visits the local `/shop` page, reads its `h1`, and must return
-   `{"heading":"Shop"}` within 8 steps, 120 seconds, and the $0.25 soft cost limit.
-4. A passing run writes `data/agent-compatibility.json` only if the pre-run key, model,
-   SDK version, and origin still match. The record contains no key.
+    box. The fixed job visits the local `/shop` page and reads its `h1`. The instruction
+    requests `{"heading":"Shop"}`; evaluation checks the trimmed `heading` value and
+    final local URL, not an exact JSON key set. Its limits are 8 steps, 120 seconds,
+    and a $0.25 soft cost limit.
+4. A passing run must finish on the local `/shop` page with the expected heading. It
+   writes `data/agent-compatibility.json` only if the pre-run key, model, SDK version,
+   and origin still match. The record contains no key.
 5. Any key replacement/deletion or browser-model change invalidates the stamp. Re-verify
    after such a change. A stamp belongs to one data directory and does not transfer to a
    fresh clone.
@@ -297,61 +334,101 @@ vision from token counts or a correct answer.
 
 ### Run tasks and read results
 
-`/agent` supports five presets and a bounded custom task. The presets are:
+After verification, choose a preset on `/agent`, review the instruction, limits, and
+cost notice, then explicitly start a run. A custom task is also available within the same
+step/time/cost limits, but it has no automatic business evaluation. Each preset exercises
+a different kind of browser work:
 
-1. Cheapest available Home product.
-2. All out-of-stock products and their count.
-3. In-stock Audio products below $70 in ascending price order.
-4. Support form submission with prescribed test values.
-5. Product inquiry submission with prescribed test values.
+1. **Cheapest available Home product:** Find the lowest-priced in-stock Home item. Return
+   its exact name, USD price, and product URL as `name`, `priceUsd`, and `url`. The
+   evaluator checks these values against the catalog; separate page evidence checks
+   navigation. It tests whether the agent can compare prices, not whether it used a
+   particular filter control.
+2. **Out-of-stock products:** Identify every unavailable item and report the count.
+   Return `names` and `count`; the evaluator checks the complete set and count, not just
+   a plausible partial list.
+3. **Audio under $70:** List in-stock Audio products below $70 in ascending price
+   order. Return `items` containing each `name` and `priceUsd`. The evaluator checks
+   both membership and order, combining multiple conditions with sorting.
+4. **Support request:** Submit a local test as Alex Demo (`alex@example.com`) with
+   subject "Payment confirmation issue", priority High, and description "I did not
+   receive a confirmation after the simulated payment." Review the values, check the
+   local-test confirmation, submit, and return `{"requestId":"<UUID>"}`. The evaluator
+   compares every field and the returned ID with exactly one new saved support record;
+   a plausible confirmation message alone is insufficient.
+5. **Product inquiry:** Find Clarity Webcam and use its inquiry form as Alex Demo
+   (`alex@example.com`), type Specifications, with message "Does this webcam support
+   1080p video recording?" Return `{"confirmationId":"<UUID>"}`. The evaluator checks
+   all prescribed fields and exactly one new saved inquiry record. Both forms display a
+   request ID, but this task's answer key is named `confirmationId`.
 
-Catalog expected values are checked on the server and are not sent to the model. Form
-presets necessarily include their prescribed values in the instruction. Before a form
-task, the server snapshots existing submission IDs so exactly one new record can be
-required.
+Catalog expectations are derived from the server-side product fixture, not sent to the
+model. Form presets include the prescribed test values in the instruction because the
+agent needs to enter them. Every preset requires exactly one JSON answer in its stated
+shape, without extra keys or prose. For a human cross-check, the catalog fixture expects
+Pebble Plant Pot at $22 (`/shop/products/pebble-plant-pot`) for Task 1; four
+out-of-stock products (Atlas Travel Backpack, Pulse Sport Earbuds, Glow Aroma Diffuser,
+Aero Laptop Stand) for Task 2; and Mini Bluetooth Radio at $44 followed by Echo Mini
+Speaker at $59 for Task 3.
+
+Before each form run, the server snapshots existing submission IDs to distinguish this
+run's record from previous experiments. The dashboard shows the active run, a live trace
+(with a status-poll fallback), and the newest 50 stored run summaries. Selecting a saved
+run loads its trace; the history payload does not include full task text, output, or
+errors. Unknown usage or cost is shown as unknown, not as zero or a provider invoice.
 
 The dashboard keeps these concepts separate:
 
-- **Execution status**: running, completed, limit reached, error, timed out, cancelled,
-  interrupted, or hung.
-- **Business evaluation**: passed, failed, or not evaluated. Custom and verification runs
-  are never automatically passed.
-- **UI evidence**: observed only when the SDK recording contains a browser page action
-  such as a navigation, click, or type. This is trace evidence, not cryptographic proof.
+- **Run lifecycle**: running, cancelling, hung, completed, failed, or interrupted.
+- **Stop reason**: completed, max_steps, timeout, cancelled, cost_limit, context_limit,
+  incomplete, or error (when the run has ended). This is distinct from lifecycle status.
+- **Business evaluation**: passed, failed, or not evaluated. The fixed verification
+  heading can pass and enable tasks; custom runs are not automatically evaluated.
+- **UI evidence**: observed when the SDK records a browser page-action label such as
+  Navigate, Click, Type, or Scroll. A label alone does not prove the action succeeded;
+  the task-specific path check and independent business evaluation still matter.
 
-A **full task pass** requires completed execution, a passed business evaluation, and
-observed UI evidence. A completed process alone is not a pass.
+A **full task pass** requires a completed lifecycle with stop reason `completed`, a passed
+business evaluation, observed UI evidence, and page-specific evidence: catalog tasks
+need recorded navigation ending under the local `/shop`, and form tasks need recorded
+interaction ending on the corresponding form page. A completed process, or a correct
+answer without relevant page actions, is not a full pass.
 
 ### Mode resilience comparison
 
-The `/agent` dashboard includes a descriptive comparison of stored predefined-task
-outcomes. It reads the newest 50 stored runs shown by the dashboard; it never rewrites or
-starts a run by itself.
+To compare layouts, run the same preset with the same model in Classic and Alternate,
+then open the comparison on `/agent`. The dashboard groups stored predefined-task
+outcomes from its newest 50 runs; viewing the table never rewrites or starts a run.
+Failures can reflect model behavior, cost/step limits, or missing UI evidence, so inspect
+the individual trace before drawing conclusions from the counts.
 
 - Filter by predefined task and model. Each row includes the model, task, layout mode,
   full-pass count, business-pass count, and sample size.
-- **Success** is the strict full task pass: completed execution, an independent
-  evaluation pass, and observed UI evidence. A business pass with a cancelled, incomplete,
-  or UI-unverified run is reported separately, not as success.
+- **Success** is the strict full task pass, including the required page-specific UI
+  evidence. A business pass with a cancelled, incomplete, or UI-unverified run is
+  reported separately, not as success.
 - Active runs, custom tasks, verification runs, and old runs without a captured mode are
   excluded and counted in the panel note.
-- A single run is labeled anecdotal. Samples below five are labeled descriptive only, and
-  the panel performs no significance test or confidence interval. It does not present a
-  single run as statistically reliable evidence.
+- A single run is labeled **Single run**; samples below five carry **Small sample**
+  and are described as descriptive only. The panel performs no significance test
+  or confidence interval; do not treat a few runs as statistically reliable evidence.
 - Rows for both modes remain visible even when one side has no sample, with a note that
   the pair needs terminal runs in both modes.
 
-**Collect another sample (live)** is separate from the comparison table. It uses the
-current layout and current verified model, and it requires a fresh checkbox confirmation
-for every repetition. The displayed limits are the normal agent defaults and server hard
-caps; usage is an SDK estimate, not a provider invoice, and the soft cap can be exceeded
-by one response. Switching the layout first is what adds the other mode.
+**Collect another sample (live)** is separate from the comparison table. Choose a
+**Preset to repeat**; it starts one new paid task in the current layout with the current
+verified model and requires a fresh checkbox confirmation for every repetition. Switch
+the layout first to add a sample to the other mode. Repetition uses the default agent
+limits, not custom limits from the task panel; the UI also shows the server hard caps;
+usage is an SDK estimate, not a provider invoice, and the soft cap can be exceeded by one
+response. A single run is anecdotal even if its task passes.
 
 ### Cancellation, process cleanup, and manual recovery
 
-- **Cancel** asks the worker to stop cooperatively. The supervisor waits a short grace
-  period, then terminates only the verified worker process group. A run stays unavailable
-  for a new start until cleanup is proven.
+- **Cancel** on an active task run asks the worker to stop cooperatively. The verification
+  panel has no cancel control. The supervisor waits a short grace period, then terminates
+  only the verified worker process group. A run stays unavailable for a new start until
+  cleanup is proven.
 - If the app exits while a run is active, the next startup marks the run `interrupted`,
   verifies and terminates its recorded process group, and removes the disposable browser
   profile only when the group is gone.
@@ -375,7 +452,7 @@ filesystem supports them:
 data/
   .server.lock
   settings.json                    # model choices; never the key
-  ui-settings.json                 # Classic/Alternate layout; no personal data
+   ui-settings.json                 # Classic/Alternate layout; no personal data
   agent-compatibility.json         # verified model/SDK/origin tuple; never the key
   secrets/openrouter-key           # only with Remember on; plaintext, mode 0600
   images/manifest.json             # lifetime attempt/active-image ledger
@@ -400,15 +477,19 @@ Privacy and security facts:
   names, timestamps, and error text. They are stored locally. Prompts, cookies, headers,
   and key material are not intentionally persisted, but a trace is not a cryptographic
   audit log.
-- The key is never returned to the browser, placed in local storage, URLs, settings, run
-  events, or logs. It is passed to the agent child through a private environment channel.
+- You enter the key in the browser on `/setup`; it is sent to the local server for
+  validation. The server does not return it in responses or place it in browser local
+  storage, URLs, settings, run events, or logs. It passes the key to the agent child
+  through a private environment channel.
 - Browser Use Pi executes generated JavaScript without a security sandbox. The child
   process, prompt restrictions, and SDK hostname allowlist reduce risk but are not
   filesystem or network isolation. Use only trusted local pages, tasks, and test data.
 - There is no authentication. Keep the server on loopback and do not expose the port to a
   LAN or the internet.
-- Generated image prompts are sent to OpenRouter. Form validation and acknowledgments are
-  local and are not AI-generated.
+- Image prompts and agent task/page context are sent to OpenRouter during paid model
+  calls. Use only test data in tasks and agent-filled forms; the agent may include page
+  or form content in its model context. Form validation, storage, and acknowledgments
+  remain local and are not AI-generated.
 - There is no telemetry, CDN, analytics, or external asset loading in normal use. Approved
   OpenRouter requests are the only expected outbound application traffic.
 
@@ -426,7 +507,8 @@ Use the **OpenRouter API key** section on `/setup`:
 
 ### Reset generated images without deleting the remembered key
 
-Stop the server first. Then remove only image state:
+Stop the server and let any active image or agent operation settle first. Then remove only
+image state:
 
 ```bash
 rm -rf data/images
@@ -436,7 +518,9 @@ rm -f data/image-job.json data/image-recovery.json
 Do **not** remove `data/secrets/openrouter-key` unless you also intend to delete the
 remembered key. Restart the app; `/setup` will show a fresh quote for all missing images.
 The app does not regenerate images automatically. To keep individual valid images, do not
-delete the whole `data/images` directory; use the app's regeneration/resume flow instead.
+delete the whole `data/images` directory; use **Resume missing images** or **Retry failed
+images** on `/setup` for unresolved targets instead. These controls do not replace an
+already valid image.
 
 ### Delete form test data
 
@@ -452,10 +536,11 @@ This leaves images, keys, settings, and agent history intact.
 ### Full local reset
 
 A complete reset removes everything, including a remembered key, settings, form data,
-generated images, and agent history:
+generated images, and agent history. Stop the server first and ensure no worker/browser
+process or unresolved manual-cleanup barrier remains; if one does, keep `data/` and use
+the [recovery instructions](#cancellation-process-cleanup-and-manual-recovery) first.
 
 ```bash
-# Stop the server first.
 rm -rf data
 ```
 
@@ -474,7 +559,6 @@ npm run test:e2e
 npm run test:e2e:alternate
 npm run build
 npm run smoke:browser-local
-npm run smoke:built-worker
 ```
 
 - `npm test` runs Vitest without Chromium or a real API key.
@@ -492,15 +576,14 @@ npm run smoke:built-worker
 - `npm run smoke:browser-local` launches local Chromium, reads a local heading through both
   `127.0.0.1` and `localhost`, and closes it. It uses no inference and no key. Use
   `npm run smoke:browser-local -- --headless` only for a display-less feasibility check.
-- `npm run smoke:built-worker` requires a production build and verifies built `start` plus
-  the fake-SDK worker and POSIX process-group cleanup. It makes no provider request.
 - `npm run test:agent` is a no-charge health/key/consent preflight by default. A live
   heading observation requires `--live --approve-paid` and per-observation approval
   (`--approve-observation=1` and/or `2`, or an interactive yes). It honors the shared paid
   lock and stamps the app only with the current remembered key and matching tuple. Do not
   run it without explicit spending approval.
-- The deterministic suites do not prove live model access, vision support, or a real
-  provider task result. Record live observations separately and label them accurately.
+- Mock-backed tests verify local behavior, not access to your OpenRouter account or
+  successful real-provider tasks. A correct text heading never establishes screenshot
+  or vision support; keep any such observations separate from deterministic test results.
 
 ### Local origin and test-only seams
 
@@ -535,12 +618,12 @@ Never point `OPENROUTER_BASE_URL` at a remote host, never use the test seams wit
 | `/api/health` returns 503 | The server does not hold `data/.server.lock`, or the request reached the wrong process/port. Check the configured origin and restart. |
 | Invalid `APP_ORIGIN` | Use `http://127.0.0.1:<port>` or another loopback host with an explicit non-default port, with no path/query. Restart with the same value. |
 | `Chrome not found`, `Chrome exited`, or no display | Install Google Chrome/Chromium, enable WSLg or an X server, and check `DISPLAY`/`WAYLAND_DISPLAY`. The standalone smoke scripts add hints; the application's `/agent` path may show only the bounded SDK launch error. For a non-interactive browser check use the headless smoke. |
-| Key validation fails with 401 | The key is invalid or not an inference key. Replace it. A management-only key cannot run inference or images. |
-| Image generation stops with 402 | The account balance is below the image API's $1-per-request floor. Add credit or choose a verifiably priced model. |
+| Key validation fails with 401 | The key was rejected; check or replace it. A management-only key may pass validation but cannot run inference or generate images. |
+| Image generation stops with 402 | The account balance is below the image API's $1-per-request floor. Add credit and review a fresh quote before resuming; choosing a cheaper model does not remove the floor. |
 | Quote is blocked (`unknown-price`, `stale-model`, `unverified-capabilities`) | The selected model metadata or account entitlement could not be verified. Recheck the model ID/capabilities and quote. No paid request was made. |
 | Agent says verification is required | Use **Verify agent model** on `/agent` after entering a key. A key/model/SDK/origin change invalidates the old stamp. |
 | Agent gate reports a model/origin/SDK mismatch | The stamp belongs to a different tuple. Restore the matching setting or re-verify. A stamp does not transfer between data directories. |
-| Vision shows `Unverified` | Expected in this build; no request instrumentation proves image bytes reached the model. Image content in a tool result is not transport proof, and a text heading answer is not vision evidence. |
+| Vision shows `Unverified` | Browser verification reads text from `/shop`; it does not establish that image bytes reached the model. Image content in a tool result and a correct heading answer are not transport proof. |
 | Agent run is `hung`, or a browser process remains | Restart the app and let startup recovery verify/terminate the recorded group. Inspect `data/agent-recovery.json`, `data/locks/paid-job.lock`, and `data/browser-profiles/`. Do not delete locks before confirming processes are gone. |
 | Corrupt saved state | Inspect the named JSON file under `data/`; the app reports corruption rather than discarding data. Fix or restore the file, or perform a deliberate full reset. |
 | Layout shows Classic despite a saved choice, or the layout cannot change | Inspect `data/ui-settings.json`. A corrupt optional layout setting falls back to Classic on catalog/form/agent pages with a warning and blocks a new agent run as `state-unreadable`; fix or remove the file deliberately. A `409 paid-operation-active` response means an image batch, agent run, or another layout change is active. |
@@ -549,12 +632,10 @@ Never point `OPENROUTER_BASE_URL` at a remote host, never use the test seams wit
 | E2E refuses a base-URL override | The override requires `LAB_TEST_MODE=1` and a disposable `DATA_DIR` under the OS temp root outside the project. Use the provided `npm run test:e2e` harness instead of a real data directory. |
 | Dev server behaves oddly after a production build | Stop it and remove only the dev cache (`.next/dev`), then restart. Do not delete `data/` to fix a cache issue. |
 
-## Scope limits
+## Operational limits
 
-- The app is a local demonstration, not a production storefront. There is no checkout,
-  payment, email, authentication, or multi-user isolation.
-- One server per data directory and one paid operation at a time are enforced. Agent runs
-  are limited to one active run.
-- Paid live image/agent acceptance remains separately approved and unverified until
-  actually observed. The optional alternate UI and resilience comparison are
-  implemented; they do not replace live acceptance.
+Only one server may use a given data directory, only one paid operation may run at a
+time, and only one agent run may be active. A mock-backed test or comparison of saved
+runs is not evidence that your account can use a particular live model. Use the app's
+own quote and confirmation for image requests, and verify the browser model on your
+own origin and data directory before running live agent tasks.
